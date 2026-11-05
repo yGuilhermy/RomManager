@@ -72,7 +72,53 @@ pub fn initialize_db(db_path: &Path) -> Result<Connection> {
             description TEXT,
             source TEXT,
             updated_at TEXT NOT NULL
-        );",
+        );
+
+        CREATE TABLE IF NOT EXISTS game_variants (
+            id TEXT PRIMARY KEY,
+            game_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            edition TEXT,
+            region TEXT,
+            serial TEXT,
+            disc_number INTEGER DEFAULT 1,
+            disc_total INTEGER DEFAULT 1,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS game_files (
+            id TEXT PRIMARY KEY,
+            variant_id TEXT NOT NULL,
+            game_id TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            path_key TEXT NOT NULL UNIQUE,
+            file_size INTEGER NOT NULL,
+            format TEXT NOT NULL,
+            modified_at TEXT,
+            sha1 TEXT,
+            crc32 TEXT,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_game_variants_game_id ON game_variants(game_id);
+        CREATE INDEX IF NOT EXISTS idx_game_files_variant_id ON game_files(variant_id);
+        CREATE INDEX IF NOT EXISTS idx_game_files_game_id ON game_files(game_id);
+
+        CREATE TABLE IF NOT EXISTS jobs (
+            id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,
+            title TEXT NOT NULL,
+            status TEXT NOT NULL,
+            progress REAL NOT NULL DEFAULT 0.0,
+            current_step TEXT NOT NULL DEFAULT '',
+            total_steps INTEGER NOT NULL DEFAULT 0,
+            completed_steps INTEGER NOT NULL DEFAULT 0,
+            error_message TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            finished_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);",
     )?;
 
     let _ = conn.execute(
@@ -91,8 +137,29 @@ pub fn initialize_db(db_path: &Path) -> Result<Connection> {
     }
     crate::rom_scanner::normalize_library(&mut conn)
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(e))))?;
+    sync_game_variants_and_files(&mut conn)?;
 
     Ok(conn)
+}
+
+pub fn sync_game_variants_and_files(conn: &mut Connection) -> Result<()> {
+    conn.execute(
+        "INSERT INTO game_variants (id, game_id, title, region, serial, created_at)
+         SELECT 'var_' || id, id, title, region, serial, date_added
+         FROM games
+         WHERE NOT EXISTS (SELECT 1 FROM game_variants WHERE game_variants.game_id = games.id)",
+        [],
+    )?;
+
+    conn.execute(
+        "INSERT INTO game_files (id, variant_id, game_id, file_path, path_key, file_size, format, created_at)
+         SELECT 'file_' || games.id, COALESCE((SELECT id FROM game_variants WHERE game_variants.game_id = games.id LIMIT 1), 'var_' || games.id), games.id, games.file_path, games.path_key, games.file_size, games.format, games.date_added
+         FROM games
+         WHERE games.path_key IS NOT NULL AND NOT EXISTS (SELECT 1 FROM game_files WHERE game_files.path_key = games.path_key)",
+        [],
+    )?;
+
+    Ok(())
 }
 
 fn seed_default_configs(conn: &Connection) -> Result<()> {

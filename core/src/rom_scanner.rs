@@ -21,6 +21,24 @@ pub struct InstalledGame {
     pub region: Option<String>,
     pub serial: Option<String>,
     pub date_added: String,
+    #[serde(default)]
+    pub is_missing: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IntegrityCheckResult {
+    pub id: String,
+    pub title: String,
+    pub file_path: String,
+    pub exists: bool,
+    pub actual_size: u64,
+    pub expected_size: u64,
+    pub size_matches: bool,
+    pub valid_format: bool,
+    pub format: String,
+    pub serial: Option<String>,
+    pub healthy: bool,
+    pub message: String,
 }
 
 pub fn is_safe_filename(name: &str) -> bool {
@@ -369,7 +387,6 @@ fn belongs_to_root(path: &Path, root: &Path) -> bool {
         .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
-// Older scanners stored the same Windows file with and without the extended path prefix.
 pub fn normalize_library(conn: &mut Connection) -> Result<usize, String> {
     let records = {
         let mut stmt = conn.prepare("SELECT id,file_path,date_added,cover_url FROM games ORDER BY date_added ASC,id ASC").map_err(|e|e.to_string())?;
@@ -441,6 +458,10 @@ pub fn normalize_library(conn: &mut Connection) -> Result<usize, String> {
                 params![cover, survivor],
             )
             .map_err(|e| e.to_string())?;
+            tx.execute("DELETE FROM game_files WHERE game_id=?1", params![id])
+                .map_err(|e| e.to_string())?;
+            tx.execute("DELETE FROM game_variants WHERE game_id=?1", params![id])
+                .map_err(|e| e.to_string())?;
             tx.execute("DELETE FROM games WHERE id=?1", params![id])
                 .map_err(|e| e.to_string())?;
             removed += 1;
@@ -589,6 +610,44 @@ pub async fn scan_roms_directory(
                         ],
                     ).map_err(|e| e.to_string())?;
 
+                    conn.execute(
+                        "INSERT INTO game_variants (id, game_id, title, region, serial, created_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                         ON CONFLICT(id) DO UPDATE SET
+                            title = excluded.title,
+                            region = excluded.region,
+                            serial = excluded.serial",
+                        params![
+                            format!("var_{}", id),
+                            id,
+                            raw_stem,
+                            region,
+                            serial,
+                            date_added,
+                        ],
+                    ).map_err(|e| e.to_string())?;
+
+                    conn.execute(
+                        "INSERT INTO game_files (id, variant_id, game_id, file_path, path_key, file_size, format, created_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                         ON CONFLICT(path_key) DO UPDATE SET
+                            variant_id = excluded.variant_id,
+                            game_id = excluded.game_id,
+                            file_path = excluded.file_path,
+                            file_size = excluded.file_size,
+                            format = excluded.format",
+                        params![
+                            format!("file_{}", id),
+                            format!("var_{}", id),
+                            id,
+                            file_path,
+                            path_key,
+                            file_size as i64,
+                            format,
+                            date_added,
+                        ],
+                    ).map_err(|e| e.to_string())?;
+
                     found_games.push(InstalledGame {
                         id,
                         title: raw_stem,
@@ -600,6 +659,7 @@ pub async fn scan_roms_directory(
                         region,
                         serial,
                         date_added,
+                        is_missing: false,
                     });
                 }
             }
@@ -621,6 +681,10 @@ pub async fn scan_roms_directory(
 
     for (db_id, db_path) in current_db_ids {
         if belongs_to_root(Path::new(&db_path), &roms_dir) && !found_ids.contains(&db_id) {
+            conn.execute("DELETE FROM game_files WHERE game_id = ?1", params![db_id])
+                .map_err(|e| e.to_string())?;
+            conn.execute("DELETE FROM game_variants WHERE game_id = ?1", params![db_id])
+                .map_err(|e| e.to_string())?;
             conn.execute("DELETE FROM games WHERE id = ?1", params![db_id])
                 .map_err(|e| e.to_string())?;
         }
@@ -636,23 +700,98 @@ pub fn list_installed_games(conn: &Connection) -> Result<Vec<InstalledGame>, Str
 
     let rows = stmt
         .query_map([], |row| {
+            let file_path: String = row.get(3)?;
+            let is_missing = !Path::new(&file_path).exists();
             Ok(InstalledGame {
                 id: row.get(0)?,
                 title: row.get(1)?,
                 filename: row.get(2)?,
-                file_path: row.get(3)?,
+                file_path,
                 file_size: row.get::<_, i64>(4)? as u64,
                 format: row.get(5)?,
                 cover_url: row.get(6)?,
                 region: row.get(7)?,
                 serial: row.get(8)?,
                 date_added: row.get(9)?,
+                is_missing,
             })
         })
         .map_err(|e| e.to_string())?;
 
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())
+}
+
+pub fn verify_game_integrity(conn: &Connection, id: &str) -> Result<IntegrityCheckResult, String> {
+    let mut stmt = conn
+        .prepare("SELECT id, title, filename, file_path, file_size, format, serial FROM games WHERE id = ?1")
+        .map_err(|e| e.to_string())?;
+
+    let row = stmt
+        .query_row(params![id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, i64>(4)? as u64,
+                r.get::<_, String>(5)?,
+                r.get::<_, Option<String>>(6)?,
+            ))
+        })
+        .map_err(|e| format!("Jogo não encontrado: {}", e))?;
+
+    let (id, title, _filename, file_path, expected_size, format, recorded_serial) = row;
+    let path = Path::new(&file_path);
+    let exists = path.exists() && path.is_file();
+
+    if !exists {
+        return Ok(IntegrityCheckResult {
+            id,
+            title,
+            file_path,
+            exists: false,
+            actual_size: 0,
+            expected_size,
+            size_matches: false,
+            valid_format: false,
+            format,
+            serial: recorded_serial,
+            healthy: false,
+            message: "O arquivo da ROM não foi localizado no caminho gravado.".to_string(),
+        });
+    }
+
+    let metadata = fs::metadata(path).map_err(|e| e.to_string())?;
+    let actual_size = metadata.len();
+    let size_matches = actual_size == expected_size || expected_size == 0;
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let valid_format = is_valid_rom_extension(ext);
+    let current_serial = extract_serial_from_file(path).or(recorded_serial);
+
+    let healthy = exists && size_matches && valid_format;
+    let message = if healthy {
+        "Arquivo íntegro, formato válido e verificado no disco.".to_string()
+    } else if !size_matches {
+        "O tamanho atual do arquivo difere do tamanho registrado no catálogo.".to_string()
+    } else {
+        "O formato ou extensão do arquivo não é reconhecido como ROM compatível.".to_string()
+    };
+
+    Ok(IntegrityCheckResult {
+        id,
+        title,
+        file_path,
+        exists,
+        actual_size,
+        expected_size,
+        size_matches,
+        valid_format,
+        format,
+        serial: current_serial,
+        healthy,
+        message,
+    })
 }
 
 pub fn delete_installed_game(
@@ -673,6 +812,10 @@ pub fn delete_installed_game(
         Err(e) => return Err(format!("Não foi possível excluir a ROM: {e}")),
     }
     let tx = conn.transaction().map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM game_files WHERE game_id = ?1", params![id])
+        .map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM game_variants WHERE game_id = ?1", params![id])
+        .map_err(|e| e.to_string())?;
     tx.execute("DELETE FROM games WHERE id = ?1", params![id])
         .map_err(|e| e.to_string())?;
     crate::database::add_history(

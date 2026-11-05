@@ -16,6 +16,18 @@ pub struct RomCatalogItem {
     pub region: String,
     pub url: String,
     pub cover_url: String,
+    #[serde(default = "default_catalog_format")]
+    pub format: String,
+    #[serde(default = "default_catalog_source")]
+    pub source: String,
+}
+
+fn default_catalog_format() -> String {
+    "CHD".to_string()
+}
+
+fn default_catalog_source() -> String {
+    "Catálogo Oficial (CHD)".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +64,19 @@ pub fn query_catalog(
     category: Option<&str>,
     sort: Option<&str>,
     letter: Option<&str>,
+    page: usize,
+    per_page: usize,
+) -> CatalogResponse {
+    query_catalog_with_format(query, region, category, sort, letter, None, page, per_page)
+}
+
+pub fn query_catalog_with_format(
+    query: Option<&str>,
+    region: Option<&str>,
+    category: Option<&str>,
+    sort: Option<&str>,
+    letter: Option<&str>,
+    format_filter: Option<&str>,
     page: usize,
     per_page: usize,
 ) -> CatalogResponse {
@@ -111,6 +136,17 @@ pub fn query_catalog(
                 let matches_cat = title_lower.contains(&cat) || file_lower.contains(&cat);
                 if !matches_cat {
                     return false;
+                }
+            }
+
+            if let Some(f) = format_filter {
+                let f_clean = f.trim();
+                if !f_clean.is_empty() && !f_clean.eq_ignore_ascii_case("all") {
+                    let matches_format = item.format.eq_ignore_ascii_case(f_clean)
+                        || item.filename.to_lowercase().ends_with(&format!(".{}", f_clean.to_lowercase()));
+                    if !matches_format {
+                        return false;
+                    }
                 }
             }
 
@@ -330,6 +366,8 @@ pub async fn search_translations(query: &str) -> Result<Vec<RomCatalogItem>, Str
                 region: "PT-BR / Mod".to_string(),
                 url: dl_url,
                 cover_url,
+                format: "7Z".to_string(),
+                source: "CDRomance (Traduções)".to_string(),
             });
         }
     }

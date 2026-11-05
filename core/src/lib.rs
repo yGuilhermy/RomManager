@@ -4,6 +4,7 @@ pub mod database;
 pub mod download_manager;
 pub mod exe_runner;
 pub mod game_metadata;
+pub mod jobs;
 pub mod profile;
 pub mod rom_scanner;
 
@@ -33,6 +34,7 @@ pub struct AppState {
     pub download_manager: Arc<Mutex<download_manager::DownloadManager>>,
     pub logs: Arc<Mutex<Vec<String>>>,
     pub cover_job: Arc<Mutex<covers::CoverJob>>,
+    pub job_manager: Arc<jobs::JobManager>,
 }
 
 #[derive(Serialize)]
@@ -69,6 +71,7 @@ pub struct CatalogQuery {
     pub letter: Option<String>,
     pub page: Option<usize>,
     pub per_page: Option<usize>,
+    pub format: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -155,11 +158,14 @@ pub async fn start_api() {
         "Servidor do RomManager iniciado com sucesso na porta 3000.".to_string(),
     ]));
 
+    let job_mgr = Arc::new(jobs::JobManager::new(db_path.clone()));
+
     let state = Arc::new(AppState {
         db_path,
         download_manager: download_mgr,
         logs,
         cover_job: Arc::new(Mutex::new(covers::CoverJob::default())),
+        job_manager: job_mgr,
     });
 
     let cors = CorsLayer::new()
@@ -194,6 +200,7 @@ pub async fn start_api() {
         .route("/api/games/run", post(run_game_direct))
         .route("/api/game/metadata", get(get_game_metadata_handler))
         .route("/api/games/:id/launch", post(launch_game))
+        .route("/api/games/:id/verify", get(verify_game_handler))
         .route("/api/games/:id", delete(delete_game))
         .route("/api/games/:id/open-folder", post(open_game_folder))
         .route("/api/downloads", get(get_downloads).post(start_download))
@@ -209,6 +216,9 @@ pub async fn start_api() {
         .route("/api/downloads/:id/cancel", post(cancel_download))
         .route("/api/downloads/:id/retry", post(retry_download))
         .route("/api/downloads/:id", delete(delete_download))
+        .route("/api/jobs", get(list_jobs_handler).post(create_job_handler))
+        .route("/api/jobs/:id", get(get_job_handler).delete(delete_job_handler))
+        .route("/api/jobs/:id/cancel", post(cancel_job_handler))
         .route("/api/favorites", get(list_favorites).post(add_favorite))
         .route("/api/favorites/:id", delete(delete_favorite))
         .route(
@@ -440,12 +450,13 @@ async fn get_catalog(Query(q): Query<CatalogQuery>) -> Json<api_roms::CatalogRes
     let page = q.page.unwrap_or(1);
     let per_page = q.per_page.unwrap_or(24);
     let search_query = q.q.or(q.search);
-    let res = api_roms::query_catalog(
+    let res = api_roms::query_catalog_with_format(
         search_query.as_deref(),
         q.region.as_deref(),
         q.category.as_deref(),
         q.sort.as_deref(),
         q.letter.as_deref(),
+        q.format.as_deref(),
         page,
         per_page,
     );
@@ -584,6 +595,18 @@ async fn launch_game(
             (StatusCode::OK, "Jogo iniciado no PCSX2.".to_string())
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+async fn verify_game_handler(
+    AxumPath(id): AxumPath<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<rom_scanner::IntegrityCheckResult>, (StatusCode, String)> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    match rom_scanner::verify_game_integrity(&conn, &id) {
+        Ok(res) => Ok(Json(res)),
+        Err(e) => Err((StatusCode::NOT_FOUND, e)),
     }
 }
 
@@ -1065,6 +1088,61 @@ async fn get_game_metadata_handler(
 
     let res = game_metadata::get_metadata_for_game(&db_path, &title, serial).await;
     Json(res)
+}
+
+async fn list_jobs_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<jobs::JobRecord>>, (StatusCode, String)> {
+    state
+        .job_manager
+        .list_jobs()
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+async fn get_job_handler(
+    AxumPath(id): AxumPath<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<jobs::JobRecord>, StatusCode> {
+    match state.job_manager.get_job(&id) {
+        Ok(Some(job)) => Ok(Json(job)),
+        Ok(None) => Err(StatusCode::NOT_FOUND),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn create_job_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<jobs::CreateJobPayload>,
+) -> Result<Json<jobs::JobRecord>, (StatusCode, String)> {
+    let steps = payload.total_steps.unwrap_or(10);
+    state
+        .job_manager
+        .create_job(&payload.kind, &payload.title, steps)
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+async fn cancel_job_handler(
+    AxumPath(id): AxumPath<String>,
+    State(state): State<Arc<AppState>>,
+) -> StatusCode {
+    match state.job_manager.request_cancel(&id) {
+        Ok(true) => StatusCode::OK,
+        Ok(false) => StatusCode::NOT_FOUND,
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+async fn delete_job_handler(
+    AxumPath(id): AxumPath<String>,
+    State(state): State<Arc<AppState>>,
+) -> StatusCode {
+    match state.job_manager.delete_job(&id) {
+        Ok(true) => StatusCode::OK,
+        Ok(false) => StatusCode::NOT_FOUND,
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
 }
 
 #[cfg(test)]

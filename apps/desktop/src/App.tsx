@@ -2,12 +2,13 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import "./App.css";
 import { apiFetch, apiJson } from "./lib/api";
 import { DeleteGameDialog } from "./components/DeleteGameDialog";
-import type { InstalledGame, FavoriteItem, HistoryItem, ValidationResult, CoverJob } from "./types";
+import type { InstalledGame, FavoriteItem, HistoryItem, ValidationResult, CoverJob, JobItem, IntegrityResult } from "./types";
 import { formatBytes } from "./lib/format";
 import { CoverImage } from "./components/CoverImage";
 import { LibraryGameCard } from "./components/LibraryGameCard";
 import { SettingsPage } from "./components/SettingsPage";
 import { ProfilePage } from "./components/ProfilePage";
+import { ActivityPage } from "./components/ActivityPage";
 import packageInfo from "../package.json";
 import logoUrl from "./assets/logo.png";
 import { ToastContainer, showToast } from "./components/Toast";
@@ -21,6 +22,8 @@ interface RomCatalogItem {
     region: string;
     url: string;
     cover_url: string;
+    format?: string;
+    source?: string;
 }
 
 interface CatalogResponse {
@@ -88,7 +91,7 @@ function renderCompatBadge(status: string) {
     );
 }
 
-type Tab = "library" | "catalog" | "search" | "downloads" | "settings" | "profile" | "game-page";
+type Tab = "library" | "catalog" | "search" | "downloads" | "activity" | "settings" | "profile" | "game-page";
 
 const PER_PAGE_OPTIONS = [12, 24, 48, 96];
 
@@ -143,6 +146,12 @@ function renderNavIcon(id: Tab) {
                     <line x1="12" y1="15" x2="12" y2="3" />
                 </svg>
             );
+        case "activity":
+            return (
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+                </svg>
+            );
         case "settings":
             return (
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -162,8 +171,15 @@ function renderNavIcon(id: Tab) {
     }
 }
 
+
 export default function App() {
-    const [activeTab, setActiveTab] = useState<Tab>("catalog");
+    const [activeTab, setActiveTab] = useState<Tab>(() => {
+        try {
+            const t = new URLSearchParams(window.location.search).get("tab") as Tab;
+            if (t) return t;
+        } catch {}
+        return "catalog";
+    });
     const [previousTab, setPreviousTab] = useState<Tab>("catalog");
 
     const [installedGames, setInstalledGames] = useState<InstalledGame[]>([]);
@@ -171,6 +187,7 @@ export default function App() {
     const [librarySort, setLibrarySort] = useState("name_asc");
     const [libraryFilterRegion, setLibraryFilterRegion] = useState("all");
     const [libraryFilterFormat, setLibraryFilterFormat] = useState("all");
+    const [libraryFilterStatus, setLibraryFilterStatus] = useState<"all" | "available" | "missing">("all");
     const [viewMode, setViewMode] = useState<"grid" | "list">(() => { try { return localStorage.getItem("rom_library_view") === "list" ? "list" : "grid"; } catch { return "grid"; } });
     const [isScanning, setIsScanning] = useState(false);
     const [coverJob, setCoverJob] = useState<CoverJob | null>(null);
@@ -183,14 +200,18 @@ export default function App() {
     const [catalogTab, setCatalogTab] = useState<"popular" | "az">("popular");
     const [catalogLetter, setCatalogLetter] = useState("");
     const [catalogSort, setCatalogSort] = useState<"title_asc" | "title_desc">("title_asc");
+    const [catalogRegion, setCatalogRegion] = useState("all");
     const [catalogPage, setCatalogPage] = useState(1);
     const [perPage, setPerPage] = useState(24);
     const [jumpPage, setJumpPage] = useState("");
     const [isCatalogLoading, setIsCatalogLoading] = useState(false);
 
-    const [searchQuery, setSearchQuery] = useState("");
+    const [searchQuery, setSearchQuery] = useState(() => {
+        try { return new URLSearchParams(window.location.search).get("q") || ""; } catch { return ""; }
+    });
     const [searchGenre, setSearchGenre] = useState("");
     const [searchLang, setSearchLang] = useState("all");
+    const [searchFormat, setSearchFormat] = useState("all");
     const [searchSource, setSearchSource] = useState("all");
     const [searchSort, setSearchSort] = useState("relevance");
     const [searchPerPage, setSearchPerPage] = useState(24);
@@ -201,6 +222,7 @@ export default function App() {
     const [selectedBulk, setSelectedBulk] = useState<Map<string, RomCatalogItem>>(() => new Map());
     const [isBulkSelectActive, setIsBulkSelectActive] = useState(false);
     const [queuePaused, setQueuePaused] = useState(false);
+    const [jobs, setJobs] = useState<JobItem[]>([]);
 
     const [configs, setConfigs] = useState<Record<string, string>>({
         roms_directory: "",
@@ -216,9 +238,10 @@ export default function App() {
 
     const [showSetupWizard, setShowSetupWizard] = useState<boolean>(() => {
         try {
-            return localStorage.getItem("setup_done") !== "1";
+            if (window.location.search.includes("skip_wizard") || window.location.search.includes("tab=")) return false;
+            return localStorage.getItem("setup_done") === "0";
         } catch {
-            return true;
+            return false;
         }
     });
     const [wizardStep, setWizardStep] = useState<number>(0);
@@ -252,6 +275,8 @@ export default function App() {
     const [detailSubTab, setDetailSubTab] = useState<"info" | "compatibility">("info");
     const [gameMetadata, setGameMetadata] = useState<GameMetadata | null>(null);
     const [isLoadingMetadata, setIsLoadingMetadata] = useState(false);
+    const [integrityResult, setIntegrityResult] = useState<IntegrityResult | null>(null);
+    const [isVerifyingIntegrity, setIsVerifyingIntegrity] = useState(false);
 
     const [loadErrors, setLoadErrors] = useState<Record<string, string>>({});
     const reportLoad = useCallback((key: string, error?: unknown) => {
@@ -297,7 +322,7 @@ export default function App() {
         }
     };
 
-    const fetchCatalog = useCallback(async (p: number, tab: string, letFilter: string, q: string, pp: number, srt: string) => {
+    const fetchCatalog = useCallback(async (p: number, tab: string, letFilter: string, q: string, pp: number, srt: string, reg: string) => {
         catalogAbort.current?.abort();
         const controller = new AbortController();
         catalogAbort.current = controller;
@@ -310,6 +335,9 @@ export default function App() {
                 sort: tab === "popular" ? "popular" : srt,
                 letter: letFilter
             });
+            if (reg && reg !== "all") {
+                params.set("region", reg);
+            }
             const data = await apiJson<CatalogResponse>(`/api/catalog?${params.toString()}`, { signal: controller.signal });
             if (!controller.signal.aborted) { setCatalog(data); reportLoad("Catálogo"); }
         } catch (error) {
@@ -325,12 +353,13 @@ export default function App() {
         lang: string,
         source: string,
         sort: string,
-        pp: number
+        pp: number,
+        fmt: string
     ) => {
         searchAbort.current?.abort();
         const controller = new AbortController();
         searchAbort.current = controller;
-        if (!query.trim() && !genre.trim() && lang === "all") {
+        if (!query.trim() && !genre.trim() && lang === "all" && fmt === "all") {
             setSearchResults([]);
             setIsSearching(false);
             reportLoad("Pesquisa");
@@ -344,6 +373,32 @@ export default function App() {
                 });
                 const data = await apiJson<RomCatalogItem[]>(`/api/roms/translations?${params.toString()}`, { signal: controller.signal });
                 if (!controller.signal.aborted) setSearchResults(data);
+            } else if (source === "all") {
+                const catalogParams = new URLSearchParams({
+                    q: query.trim(),
+                    region: lang === "all" ? "" : lang,
+                    category: genre.trim(),
+                    sort: sort,
+                    page: "1",
+                    per_page: pp.toString()
+                });
+                if (fmt !== "all") catalogParams.set("format", fmt);
+                const catalogPromise = apiJson<CatalogResponse>(`/api/catalog?${catalogParams.toString()}`, { signal: controller.signal });
+                const translationsPromise = query.trim()
+                    ? apiJson<RomCatalogItem[]>(`/api/roms/translations?${new URLSearchParams({ q: query.trim() }).toString()}`, { signal: controller.signal }).catch(() => [])
+                    : Promise.resolve([]);
+                const [catalogRes, transRes] = await Promise.all([catalogPromise, translationsPromise]);
+                if (!controller.signal.aborted) {
+                    const combined = [...(catalogRes?.items || []), ...(transRes || [])];
+                    const seen = new Set<string>();
+                    const deduplicated = combined.filter(item => {
+                        const key = item.url || item.id;
+                        if (seen.has(key)) return false;
+                        seen.add(key);
+                        return true;
+                    });
+                    setSearchResults(deduplicated);
+                }
             } else {
                 const params = new URLSearchParams({
                     q: query.trim(),
@@ -353,6 +408,7 @@ export default function App() {
                     page: "1",
                     per_page: pp.toString()
                 });
+                if (fmt !== "all") params.set("format", fmt);
                 const data = await apiJson<CatalogResponse>(`/api/catalog?${params.toString()}`, { signal: controller.signal });
                 if (!controller.signal.aborted) setSearchResults(data.items);
             }
@@ -427,6 +483,20 @@ export default function App() {
         }
     }, [reportLoad]);
 
+    const fetchJobs = useCallback(async () => {
+        try {
+            const data = await apiJson<JobItem[]>("/api/jobs");
+            setJobs(data);
+            reportLoad("Atividade");
+        } catch (error) {
+            if (error instanceof Error && (error.message.includes("404") || error.message.includes("status 404"))) {
+                setJobs([]);
+                return;
+            }
+            reportLoad("Atividade", error);
+        }
+    }, [reportLoad]);
+
     useEffect(() => {
         fetchInstalledGames();
         fetchDownloads();
@@ -434,12 +504,14 @@ export default function App() {
         fetchLogs();
         fetchFavorites();
         fetchHistory();
+        fetchJobs();
 
         const timer = setInterval(() => {
             fetchDownloads();
+            fetchJobs();
         }, 3000);
         return () => clearInterval(timer);
-    }, [fetchInstalledGames, fetchDownloads, fetchConfigs, fetchLogs, fetchFavorites, fetchHistory]);
+    }, [fetchInstalledGames, fetchDownloads, fetchConfigs, fetchLogs, fetchFavorites, fetchHistory, fetchJobs]);
 
     useEffect(() => {
         const controller = new AbortController();
@@ -467,17 +539,17 @@ export default function App() {
     useEffect(() => () => { catalogAbort.current?.abort(); searchAbort.current?.abort(); }, []);
 
     useEffect(() => {
-        const timer = setTimeout(() => void fetchCatalog(catalogPage, catalogTab, catalogLetter, catalogSearch, perPage, catalogSort), 200);
+        const timer = setTimeout(() => void fetchCatalog(catalogPage, catalogTab, catalogLetter, catalogSearch, perPage, catalogSort, catalogRegion), 200);
         return () => clearTimeout(timer);
-    }, [catalogPage, catalogTab, catalogLetter, catalogSearch, perPage, catalogSort, fetchCatalog]);
+    }, [catalogPage, catalogTab, catalogLetter, catalogSearch, perPage, catalogSort, catalogRegion, fetchCatalog]);
 
     useEffect(() => {
         if (activeTab !== "search") return;
         const timer = setTimeout(() => {
-            executeSearch(searchQuery, searchGenre, searchLang, searchSource, searchSort, searchPerPage);
+            executeSearch(searchQuery, searchGenre, searchLang, searchSource, searchSort, searchPerPage, searchFormat);
         }, 200);
         return () => clearTimeout(timer);
-    }, [activeTab, searchQuery, searchGenre, searchLang, searchSource, searchSort, searchPerPage, executeSearch]);
+    }, [activeTab, searchQuery, searchGenre, searchLang, searchSource, searchSort, searchPerPage, searchFormat, executeSearch]);
 
     useEffect(() => {
         setGameMetadata(null);
@@ -504,6 +576,7 @@ export default function App() {
         ["completed", "cancelled", "error"].includes((status || "").toLowerCase());
 
     const activeDownloadsCount = downloads.filter(d => isActiveDownload(d.status)).length;
+    const activeJobsCount = jobs.filter(j => j.status === "running" || j.status === "cancel_requested").length;
 
     const isItemInstalled = useCallback((item: RomCatalogItem) => {
         return installedGames.some(
@@ -861,6 +934,7 @@ export default function App() {
     };
 
     const openInstalledGame = (game: InstalledGame) => {
+        setIntegrityResult(null);
         setSelectedGame({ id:game.id,title:game.title,url:"",cover_url:game.cover_url || "",size:game.file_size,region:game.region || "Desconhecido",part:game.serial || "",serial:game.serial,format:game.format,isInstalled:true,installedPath:game.file_path,installedId:game.id });
         setPreviousTab(activeTab);setActiveTab("game-page");
     };
@@ -1025,6 +1099,7 @@ export default function App() {
     },[coverJob?.running,fetchInstalledGames,reportLoad]);
 
     const openGameDetail = (game: RomCatalogItem) => {
+        setIntegrityResult(null);
         const installed = installedGames.find(g => g.filename.toLowerCase() === game.filename.toLowerCase() || g.title.toLowerCase() === game.title.toLowerCase());
         setSelectedGame({
             id: game.id,
@@ -1043,11 +1118,30 @@ export default function App() {
         setActiveTab("game-page");
     };
 
+    const checkIntegrity = async (gameId: string) => {
+        setIsVerifyingIntegrity(true);
+        try {
+            const res = await apiJson<IntegrityResult>(`/api/games/${encodeURIComponent(gameId)}/verify`);
+            setIntegrityResult(res);
+            if (res.healthy) {
+                showToast("Arquivo de ROM íntegro e verificado no disco!", "success");
+            } else {
+                showToast(res.message || "Problema de integridade detectado.", "warning");
+            }
+        } catch (error) {
+            showToast(error instanceof Error ? error.message : "Não foi possível verificar a integridade.", "error");
+        } finally {
+            setIsVerifyingIntegrity(false);
+        }
+    };
+
     const filteredInstalledGames = installedGames
         .filter(g => {
             if (librarySearch && !g.title.toLowerCase().includes(librarySearch.toLowerCase())) return false;
             if (libraryFilterRegion !== "all" && g.region !== libraryFilterRegion) return false;
             if (libraryFilterFormat !== "all" && g.format.toLowerCase() !== libraryFilterFormat.toLowerCase()) return false;
+            if (libraryFilterStatus === "available" && g.is_missing) return false;
+            if (libraryFilterStatus === "missing" && !g.is_missing) return false;
             return true;
         })
         .sort((a, b) => {
@@ -1082,31 +1176,70 @@ export default function App() {
                 </div>
 
                 <div className="section-label">PLAYSTATION 2</div>
-
-                <nav className="nav">
+                <nav className="nav nav-group" aria-label="Navegação PlayStation 2">
                     {([
-                        { id: "library" as Tab, label: "Biblioteca" },
                         { id: "catalog" as Tab, label: "Catálogo PS2" },
                         { id: "search" as Tab, label: "Pesquisa" },
-                        { id: "downloads" as Tab, label: "Downloads" },
-                        { id: "settings" as Tab, label: "Configurações" },
-                        { id: "profile" as Tab, label: "Perfil" }
+                        { id: "downloads" as Tab, label: "Downloads" }
                     ] as const).map(item => (
                         <button
                             key={item.id}
                             className={`nav-item${activeTab === item.id ? " active" : ""}`}
+                            aria-current={activeTab === item.id ? "page" : undefined}
+                            onClick={() => setActiveTab(item.id)}
+                        >
+                            <span className="nav-icon">{renderNavIcon(item.id)}</span>
+                            <span>{item.label}</span>
+                            {item.id === "downloads" && activeDownloadsCount > 0 && (
+                                <span className="nav-badge">{activeDownloadsCount}</span>
+                            )}
+                        </button>
+                    ))}
+                </nav>
+
+                <div className="section-label">EMULADOR · PCSX2</div>
+                <nav className="nav nav-group" aria-label="Navegação Emulador PCSX2">
+                    {([
+                        { id: "library" as Tab, label: "Biblioteca" }
+                    ] as const).map(item => (
+                        <button
+                            key={item.id}
+                            className={`nav-item${activeTab === item.id ? " active" : ""}`}
+                            aria-current={activeTab === item.id ? "page" : undefined}
+                            onClick={() => setActiveTab(item.id)}
+                        >
+                            <span className="nav-icon">{renderNavIcon(item.id)}</span>
+                            <span>{item.label}</span>
+                        </button>
+                    ))}
+                </nav>
+
+                <div className="section-label">GERAL</div>
+                <nav className="nav nav-group" aria-label="Navegação Geral">
+                    {([
+                        { id: "activity" as Tab, label: "Atividade" },
+                        { id: "profile" as Tab, label: "Perfil" },
+                        { id: "settings" as Tab, label: "Configurações" }
+                    ] as const).map(item => (
+                        <button
+                            key={item.id}
+                            className={`nav-item${activeTab === item.id ? " active" : ""}`}
+                            aria-current={activeTab === item.id ? "page" : undefined}
                             onClick={() => {
                                 if (item.id === "profile") {
                                     fetchFavorites();
                                     fetchHistory();
+                                }
+                                if (item.id === "activity") {
+                                    void fetchJobs();
                                 }
                                 setActiveTab(item.id);
                             }}
                         >
                             <span className="nav-icon">{renderNavIcon(item.id)}</span>
                             <span>{item.label}</span>
-                            {item.id === "downloads" && activeDownloadsCount > 0 && (
-                                <span className="nav-badge">{activeDownloadsCount}</span>
+                            {item.id === "activity" && activeJobsCount > 0 && (
+                                <span className="nav-badge">{activeJobsCount}</span>
                             )}
                         </button>
                     ))}
@@ -1136,17 +1269,19 @@ export default function App() {
                                 {activeDownloadsCount} downloads ativos
                             </div>
                         )}
+                        {activeTab === "activity" && <div className="result-count">Central de Atividade</div>}
                         {activeTab === "settings" && <div className="result-count">Configurações</div>}
                         {activeTab === "profile" && <div className="result-count">Perfil</div>}
                     </div>
                 </header>
                 <div className="content">
-                    {Object.keys(loadErrors).length>0 && <div className="load-errors" role="alert"><strong>Não foi possível atualizar alguns dados. Os últimos resultados foram mantidos.</strong>{Object.entries(loadErrors).map(([key,message])=><p key={key}>{key}: {message}</p>)}<button type="button" onClick={()=>{void fetchInstalledGames();void fetchDownloads();void fetchFavorites();void fetchHistory();void fetchLogs();if(loadErrors["Configurações"])void fetchConfigs();void fetchCatalog(catalogPage,catalogTab,catalogLetter,catalogSearch,perPage,catalogSort);}}>Tentar novamente</button></div>}
+                    {Object.keys(loadErrors).length>0 && <div className="load-errors" role="alert"><strong>Não foi possível atualizar alguns dados. Os últimos resultados foram mantidos.</strong>{Object.entries(loadErrors).map(([key,message])=><p key={key}>{key}: {message}</p>)}<button type="button" onClick={()=>{void fetchInstalledGames();void fetchDownloads();void fetchFavorites();void fetchHistory();void fetchLogs();if(loadErrors["Configurações"])void fetchConfigs();void fetchCatalog(catalogPage,catalogTab,catalogLetter,catalogSearch,perPage,catalogSort,catalogRegion);}}>Tentar novamente</button></div>}
                     {activeTab === "catalog" && <>
                         <section className="catalog-heading panel"><div><p className="field-hint">PLAYSTATION 2</p><h1>Catálogo PS2</h1></div><span className="field-hint">{catalog.total.toLocaleString("pt-BR")} resultados</span></section>
                         <div className="catalog-toolbar">
                             <div className="sort-tabs"><button type="button" className={`sort-tab-btn${catalogTab==="popular"?" active":""}`} onClick={()=>{setCatalogTab("popular");setCatalogLetter("");setCatalogPage(1);}}>Populares</button><button type="button" className={`sort-tab-btn${catalogTab==="az"?" active":""}`} onClick={()=>{setCatalogTab("az");setCatalogPage(1);}}>Todos (A–Z)</button></div>
                             <div className="catalog-toolbar-right">
+                                <label className="inline-field">Região<select value={catalogRegion} onChange={event=>{setCatalogRegion(event.target.value);setCatalogPage(1);}}><option value="all">Todas as regiões</option><option value="USA">USA</option><option value="Europe">Europa</option><option value="Japan">Japão</option></select></label>
                                 {catalogTab==="az" && <label className="inline-field">Ordem<select value={catalogSort} onChange={event=>{setCatalogSort(event.target.value as "title_asc"|"title_desc");setCatalogPage(1);}}><option value="title_asc">A–Z</option><option value="title_desc">Z–A</option></select></label>}
                                 {!isBulkSelectActive ? (
                                     <button type="button" className="button-secondary" onClick={()=>setIsBulkSelectActive(true)}>Selecionar múltiplos</button>
@@ -1167,7 +1302,7 @@ export default function App() {
                                 <label className="catalog-page-size">Por página<select value={perPage} onChange={event=>{setPerPage(Number(event.target.value));setCatalogPage(1);}}>{PER_PAGE_OPTIONS.map(value=><option key={value}>{value}</option>)}</select></label>
                             </div>
                         </div>
-                        {isCatalogLoading?<div className="loader-state" role="status"><div className="spinner"/><p>Carregando catálogo…</p></div>:catalog.items.length===0?<div className="empty-state"><h3>Nenhum título encontrado</h3><p>Tente outro termo ou remova os filtros.</p></div>:<div className="mods-grid">{catalog.items.map(item=>{
+                        {isCatalogLoading?<div className="loader-state" role="status"><div className="spinner"/><p>Carregando catálogo…</p></div>:catalog.items.length===0?<div className="empty-state"><h3>Nenhum título encontrado</h3><p>Nenhum jogo corresponde aos filtros ou pesquisa ativos.</p>{(catalogSearch || catalogRegion!=="all" || catalogLetter) && <button type="button" className="button-secondary" style={{marginTop:"0.75rem"}} onClick={()=>{setCatalogSearch("");setCatalogRegion("all");setCatalogLetter("");setCatalogTab("az");setCatalogPage(1);}}>Limpar filtros do catálogo</button>}</div>:<div className="mods-grid">{catalog.items.map(item=>{
                             const installed=isItemInstalled(item);
                             const inQueue=isItemDownloadingOrQueued(item);
                             const disabled=installed || inQueue;
@@ -1193,7 +1328,24 @@ export default function App() {
                                     )}
                                     <button type="button" className="catalog-cover-button mod-thumb" aria-label={`Detalhes de ${item.title}`} onClick={()=>isBulkSelectActive ? toggleBulkSelect(item) : openGameDetail(item)}><CoverImage src={item.cover_url} title={item.title} region={item.region}/>{installed && <span className="mod-badge-installed">Instalado</span>}{!installed && inQueue && <span className="mod-badge-queued">Na fila</span>}</button>
                                 </div>
-                                <div className="mod-meta"><h3 className="mod-title"><button type="button" className="card-open" onClick={()=>openGameDetail(item)}>{item.title}</button></h3><p className="mod-author">{item.region} · {formatBytes(item.size)}</p><p className="mod-desc">Coleção: {item.part}</p></div>
+                                <div className="mod-meta">
+                                    <h3 className="mod-title"><button type="button" className="card-open" onClick={()=>openGameDetail(item)}>{item.title}</button></h3>
+                                    <div className="card-badges-row">
+                                        <span className="card-badge-chip card-badge-format">{item.format || (item.filename?.toLowerCase().endsWith(".7z") ? "7Z" : item.filename?.toLowerCase().endsWith(".iso") ? "ISO" : "CHD")}</span>
+                                        <span className="card-badge-chip card-badge-region">{item.region || "Livre"}</span>
+                                        <span className="card-badge-chip card-badge-source">{item.source || (item.part?.includes("CDRomance") ? "CDRomance" : "Catálogo")}</span>
+                                    </div>
+                                    <p className="mod-author">{item.size>0 ? formatBytes(item.size) : "Tamanho sob consulta"} · Coleção: {item.part}</p>
+                                    <div className="card-action-bar">
+                                        {installed ? (
+                                            <button type="button" className="button-secondary" onClick={()=>{setLibrarySearch(item.title);setActiveTab("library");}}>Ver na biblioteca</button>
+                                        ) : inQueue ? (
+                                            <button type="button" className="button-secondary" onClick={()=>setActiveTab("downloads")}>Ver na fila</button>
+                                        ) : (
+                                            <button type="button" className="button-secondary" disabled={isStartingDownload || disabled} onClick={()=>void startDownload(item.title,item.url,item.cover_url,item.size)}>Baixar</button>
+                                        )}
+                                    </div>
+                                </div>
                             </article>;
                         })}</div>}
                         <nav className="pagination" aria-label="Paginação do catálogo">
@@ -1211,9 +1363,20 @@ export default function App() {
                     </>}
                     {activeTab === "library" && <div className="library-container">
                         <header className="page-heading"><h2>Biblioteca de jogos</h2><p>{filteredInstalledGames.length} de {installedGames.length} jogos instalados</p></header>
+                        {installedGames.some(g => g.is_missing) && (
+                            <div className="library-missing-banner" role="alert">
+                                <div className="banner-text">
+                                    <strong>{installedGames.filter(g => g.is_missing).length} {installedGames.filter(g => g.is_missing).length === 1 ? "jogo está ausente" : "jogos estão ausentes"} na pasta de ROMs.</strong>
+                                    <span>Arquivos movidos ou deletados não podem ser iniciados no PCSX2 até nova sincronização.</span>
+                                </div>
+                                <button type="button" className="button-secondary" onClick={() => setLibraryFilterStatus("missing")}>
+                                    Ver ausentes
+                                </button>
+                            </div>
+                        )}
                         <div className="library-controls-group library-toolbar-v2"><label className="library-search-label"><span className="visually-hidden">Buscar na biblioteca</span><input className="compact-input" type="search" placeholder="Buscar na biblioteca…" value={librarySearch} onChange={event=>setLibrarySearch(event.target.value)}/></label><div className="view-mode-buttons"><button type="button" className={`view-mode-btn${viewMode==="grid"?" active":""}`} aria-pressed={viewMode==="grid"} onClick={()=>setViewMode("grid")}>Grade</button><button type="button" className={`view-mode-btn${viewMode==="list"?" active":""}`} aria-pressed={viewMode==="list"} onClick={()=>setViewMode("list")}>Lista</button></div><button type="button" className="button-secondary" disabled={isScanning || !!coverJob?.running} onClick={()=>void scanGames()}>{isScanning?"Sincronizando…":"Sincronizar pasta"}</button><button type="button" className="button-secondary" disabled={isScanning || !!coverJob?.running || !installedGames.length} onClick={()=>void regenerateCovers()}>{coverJob?.running?"Regenerando…":"Regenerar capas"}</button></div>
                         {coverJob?.running && <div className="cover-job" role="status"><div><strong>Regenerando capas: {coverJob.processed} de {coverJob.total}</strong><span>{coverJob.current || "Preparando…"}</span></div><progress aria-label="Progresso da regeneração de capas" max={coverJob.total || 1} value={coverJob.processed}/></div>}
-                        <div className="library-filters-bar"><label className="filter-item">Ordenar por<select value={librarySort} onChange={event=>setLibrarySort(event.target.value)}><option value="name_asc">Nome (A–Z)</option><option value="name_desc">Nome (Z–A)</option><option value="size_desc">Maior tamanho</option><option value="size_asc">Menor tamanho</option></select></label><label className="filter-item">Região<select value={libraryFilterRegion} onChange={event=>setLibraryFilterRegion(event.target.value)}><option value="all">Todas</option>{Array.from(new Set(installedGames.map(game=>game.region).filter((value):value is string=>!!value))).sort().map(region=><option key={region}>{region}</option>)}</select></label><label className="filter-item">Formato<select value={libraryFilterFormat} onChange={event=>setLibraryFilterFormat(event.target.value)}><option value="all">Todos</option>{Array.from(new Set(installedGames.map(game=>game.format.toLowerCase()))).sort().map(format=><option value={format} key={format}>{format.toUpperCase()}</option>)}</select></label>{(librarySearch || libraryFilterRegion!=="all" || libraryFilterFormat!=="all") && <button type="button" className="button-quiet" onClick={()=>{setLibrarySearch("");setLibraryFilterRegion("all");setLibraryFilterFormat("all");}}>Limpar filtros</button>}</div>
+                        <div className="library-filters-bar"><label className="filter-item">Ordenar por<select value={librarySort} onChange={event=>setLibrarySort(event.target.value)}><option value="name_asc">Nome (A–Z)</option><option value="name_desc">Nome (Z–A)</option><option value="size_desc">Maior tamanho</option><option value="size_asc">Menor tamanho</option></select></label><label className="filter-item">Status<select value={libraryFilterStatus} onChange={event=>setLibraryFilterStatus(event.target.value as "all"|"available"|"missing")}><option value="all">Todos</option><option value="available">Disponíveis</option><option value="missing">Ausentes</option></select></label><label className="filter-item">Região<select value={libraryFilterRegion} onChange={event=>setLibraryFilterRegion(event.target.value)}><option value="all">Todas</option>{Array.from(new Set(installedGames.map(game=>game.region).filter((value):value is string=>!!value))).sort().map(region=><option key={region}>{region}</option>)}</select></label><label className="filter-item">Formato<select value={libraryFilterFormat} onChange={event=>setLibraryFilterFormat(event.target.value)}><option value="all">Todos</option>{Array.from(new Set(installedGames.map(game=>game.format.toLowerCase()))).sort().map(format=><option value={format} key={format}>{format.toUpperCase()}</option>)}</select></label>{(librarySearch || libraryFilterRegion!=="all" || libraryFilterFormat!=="all" || libraryFilterStatus!=="all") && <button type="button" className="button-quiet" onClick={()=>{setLibrarySearch("");setLibraryFilterRegion("all");setLibraryFilterFormat("all");setLibraryFilterStatus("all");}}>Limpar filtros</button>}</div>
                         {!filteredInstalledGames.length?<div className="empty-state"><h3>Nenhum jogo encontrado</h3><p>{installedGames.length?"Nenhum resultado para os filtros aplicados.":"Configure a pasta de ROMs e clique em Sincronizar pasta."}</p></div>:<div className={viewMode==="grid"?"library-grid":"library-list"}>{filteredInstalledGames.map(game=><LibraryGameCard key={game.id} game={game} onOpen={()=>openInstalledGame(game)} onLaunch={()=>void launchGame(game.file_path)} onDelete={()=>setGameToDelete({id:game.id,title:game.title,filePath:game.file_path,coverUrl:game.cover_url || undefined})}/>)}</div>}
                     </div>}
                     {activeTab === "search" && <>
@@ -1233,8 +1396,8 @@ export default function App() {
                                 </div>
                             )}
                         </header>
-                        <section className="panel search-panel-v2"><label>Nome do jogo<input className="compact-input" type="search" placeholder="Título ou parte do nome…" value={searchQuery} onChange={event=>setSearchQuery(event.target.value)}/></label><div className="search-options-v2"><label>Termo adicional<input value={searchGenre} onChange={event=>setSearchGenre(event.target.value)} placeholder="Tradução, Undub…"/></label><label>Fonte<select value={searchSource} onChange={event=>setSearchSource(event.target.value)}><option value="all">Catálogo local CHD</option><option value="cdromance">CDRomance (até 6 títulos)</option></select></label><label>Região<select value={searchLang} disabled={searchSource==="cdromance"} onChange={event=>setSearchLang(event.target.value)}><option value="all">Todas</option><option value="USA">USA</option><option value="Europe">Europa</option><option value="Japan">Japão</option></select></label><label>Ordem<select value={searchSort} disabled={searchSource==="cdromance"} onChange={event=>setSearchSort(event.target.value)}><option value="relevance">Relevância</option><option value="title_asc">Nome (A–Z)</option><option value="size_desc">Maior tamanho</option></select></label><label>Resultados<select value={searchPerPage} disabled={searchSource==="cdromance"} onChange={event=>setSearchPerPage(Number(event.target.value))}>{[12,24,48].map(value=><option key={value}>{value}</option>)}</select></label></div></section>
-                        {isSearching?<div className="loader-state" role="status">Pesquisando…</div>:!searchResults.length?<div className="empty-state"><h3>{searchQuery || searchGenre?"Nenhum título encontrado":"Pesquisa pronta"}</h3><p>Digite o título acima para consultar as fontes.</p></div>:<div className="mods-grid">{searchResults.map(game=>{
+                        <section className="panel search-panel-v2"><label>Nome do jogo<input className="compact-input" type="search" placeholder="Título ou parte do nome…" value={searchQuery} onChange={event=>setSearchQuery(event.target.value)}/></label><div className="search-options-v2"><label>Termo adicional<input value={searchGenre} onChange={event=>setSearchGenre(event.target.value)} placeholder="Tradução, Undub…"/></label><label>Fonte<select value={searchSource} onChange={event=>setSearchSource(event.target.value)}><option value="all">Todas as fontes (Unificado)</option><option value="catalog">Catálogo local (CHD)</option><option value="cdromance">CDRomance (Traduções / Mods)</option></select></label><label>Região<select value={searchLang} disabled={searchSource==="cdromance"} onChange={event=>setSearchLang(event.target.value)}><option value="all">Todas</option><option value="USA">USA</option><option value="Europe">Europa</option><option value="Japan">Japão</option></select></label><label>Formato<select value={searchFormat} disabled={searchSource==="cdromance"} onChange={event=>setSearchFormat(event.target.value)}><option value="all">Todos</option><option value="chd">CHD</option><option value="iso">ISO</option><option value="7z">7Z</option></select></label><label>Ordem<select value={searchSort} disabled={searchSource==="cdromance"} onChange={event=>setSearchSort(event.target.value)}><option value="relevance">Relevância</option><option value="title_asc">Nome (A–Z)</option><option value="size_desc">Maior tamanho</option></select></label><label>Resultados<select value={searchPerPage} disabled={searchSource==="cdromance"} onChange={event=>setSearchPerPage(Number(event.target.value))}>{[12,24,48].map(value=><option key={value}>{value}</option>)}</select></label></div></section>
+                        {isSearching?<div className="loader-state" role="status">Pesquisando…</div>:!searchResults.length?<div className="empty-state"><h3>{searchQuery || searchGenre?"Nenhum título encontrado":"Pesquisa pronta"}</h3><p>{searchQuery || searchGenre?"Nenhum jogo corresponde aos termos e filtros aplicados.":"Digite o título acima para consultar as fontes disponíveis."}</p>{(searchQuery || searchGenre || searchLang!=="all" || searchFormat!=="all" || searchSource!=="all") && <button type="button" className="button-secondary" style={{marginTop:"0.75rem"}} onClick={()=>{setSearchQuery("");setSearchGenre("");setSearchLang("all");setSearchFormat("all");setSearchSource("all");}}>Limpar busca e filtros</button>}</div>:<div className="mods-grid">{searchResults.map(game=>{
                             const installed=isItemInstalled(game);
                             const inQueue=isItemDownloadingOrQueued(game);
                             const disabled=installed || inQueue;
@@ -1260,7 +1423,24 @@ export default function App() {
                                     )}
                                     <button type="button" className="catalog-cover-button mod-thumb" onClick={()=>isBulkSelectActive ? toggleBulkSelect(game) : openGameDetail(game)} aria-label={`Detalhes de ${game.title}`}><CoverImage src={game.cover_url} title={game.title} region={game.region}/>{installed && <span className="mod-badge-installed">Instalado</span>}{!installed && inQueue && <span className="mod-badge-queued">Na fila</span>}</button>
                                 </div>
-                                <div className="mod-meta"><h3 className="mod-title"><button type="button" className="card-open" onClick={()=>openGameDetail(game)}>{game.title}</button></h3><p className="mod-author">{game.region} · {formatBytes(game.size)}</p><button type="button" className="button-secondary" disabled={isStartingDownload || disabled} onClick={()=>void startDownload(game.title,game.url,game.cover_url,game.size)}>{installed?"Instalado":inQueue?"Na fila":"Baixar"}</button></div>
+                                <div className="mod-meta">
+                                    <h3 className="mod-title"><button type="button" className="card-open" onClick={()=>openGameDetail(game)}>{game.title}</button></h3>
+                                    <div className="card-badges-row">
+                                        <span className="card-badge-chip card-badge-format">{game.format || (game.filename?.toLowerCase().endsWith(".7z") ? "7Z" : game.filename?.toLowerCase().endsWith(".iso") ? "ISO" : "CHD")}</span>
+                                        <span className="card-badge-chip card-badge-region">{game.region || "Livre"}</span>
+                                        <span className="card-badge-chip card-badge-source">{game.source || (game.part?.includes("CDRomance") ? "CDRomance" : "Catálogo")}</span>
+                                    </div>
+                                    <p className="mod-author">{game.size>0 ? formatBytes(game.size) : "Tamanho sob consulta"}</p>
+                                    <div className="card-action-bar">
+                                        {installed ? (
+                                            <button type="button" className="button-secondary" onClick={()=>{setLibrarySearch(game.title);setActiveTab("library");}}>Ver na biblioteca</button>
+                                        ) : inQueue ? (
+                                            <button type="button" className="button-secondary" onClick={()=>setActiveTab("downloads")}>Ver na fila</button>
+                                        ) : (
+                                            <button type="button" className="button-secondary" disabled={isStartingDownload || disabled} onClick={()=>void startDownload(game.title,game.url,game.cover_url,game.size)}>Baixar</button>
+                                        )}
+                                    </div>
+                                </div>
                             </article>;
                         })}</div>}
                     </>}
@@ -1297,8 +1477,9 @@ export default function App() {
                                 <button type="button" className="button-quiet danger-text" onClick={()=>void cancelDownload(download.id)}>Cancelar</button>
                             </article>)}
                         </section>
-                        <section className="panel download-history-v2"><div className="panel-header"><h3>Histórico de downloads</h3><button type="button" className="button-quiet" disabled={!historyDownloadsList.length} onClick={()=>void clearDownloadHistory()}>Limpar histórico</button></div>{!historyDownloadsList.length && <p className="field-hint">Nenhum download finalizado.</p>}{historyDownloadsList.map(download=><article className="download-row-v2" key={download.id}><div className="download-info-v2"><h4>{download.game_title}</h4><p className="field-hint">{STATUS_LABEL[download.status] || download.status} · {formatBytes(download.size)}</p>{download.error_message && <p className="download-error">{download.error_message}</p>}</div><div className="panel-toolbar">{download.status.toLowerCase()==="completed" && download.target_path && <button type="button" className="button-secondary" onClick={()=>void launchGame(download.target_path!)}>Iniciar PCSX2</button>}{["error","cancelled"].includes(download.status.toLowerCase()) && <button type="button" className="button-secondary" onClick={()=>void retryDownload(download.id)}>Tentar novamente</button>}<button type="button" className="button-quiet" onClick={()=>void removeDownload(download.id)}>Remover</button></div></article>)}</section>
+                        <section className="panel download-history-v2"><div className="panel-header"><h3>Histórico de downloads</h3><button type="button" className="button-quiet" disabled={!historyDownloadsList.length} onClick={()=>void clearDownloadHistory()}>Limpar histórico</button></div>{!historyDownloadsList.length && <p className="field-hint">Nenhum download finalizado.</p>}{historyDownloadsList.map(download=><article className="download-row-v2" key={download.id}><div className="download-info-v2"><h4>{download.game_title}</h4><p className="field-hint">{STATUS_LABEL[download.status] || download.status} · {formatBytes(download.size)}</p>{download.target_path && <p className="download-target-path" title={download.target_path}>{download.target_path}</p>}{download.error_message && <p className="download-error">{download.error_message}</p>}</div><div className="panel-toolbar">{download.status.toLowerCase()==="completed" && <button type="button" className="button-secondary" onClick={()=>{setLibrarySearch(download.game_title);setActiveTab("library");}}>Abrir na biblioteca</button>}{download.status.toLowerCase()==="completed" && download.target_path && <button type="button" className="button-secondary" onClick={()=>void launchGame(download.target_path!)}>Iniciar PCSX2</button>}{["error","cancelled"].includes(download.status.toLowerCase()) && <button type="button" className="button-secondary" onClick={()=>void retryDownload(download.id)}>Tentar novamente</button>}<button type="button" className="button-quiet" onClick={()=>void removeDownload(download.id)}>Remover</button></div></article>)}</section>
                     </div>}
+                    {activeTab === "activity" && <ActivityPage jobs={jobs} onRefresh={fetchJobs} />}
                         {activeTab === "settings" && <SettingsPage configs={configs} onChange={(key,value)=>setConfigs(current=>({...current,[key]:value}))}
                         busy={isSavingConfig} validations={[romsValidation,pcsx2Validation,coversValidation]}
                         onSaveRoms={handleSaveRomsDir} onSaveEmulator={handleSavePcsx2Exe} onSaveCovers={handleSaveCoversDir}
@@ -1547,32 +1728,54 @@ export default function App() {
                                             <CoverImage src={selectedGame.cover_url} title={selectedGame.title} region={selectedGame.region} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
                                         </div>
                                         <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-                                            {selectedGame.isInstalled && selectedGame.installedPath ? (
-                                                <button
-                                                    className="sync-btn"
-                                                    style={{ width: "100%", padding: "0.75rem" }}
-                                                    onClick={() => launchGame(selectedGame.installedPath!)}
-                                                >
-                                                    <svg viewBox="0 0 24 24" fill="currentColor" stroke="none">
-                                                        <polygon points="6 4 20 12 6 20 6 4" />
-                                                    </svg>
-                                                    <span>Iniciar no PCSX2</span>
-                                                </button>
-                                            ) : (
-                                                <button
-                                                    className="sync-btn"
-                                                    style={{ width: "100%", padding: "0.75rem" }}
-                                                    disabled={isStartingDownload}
-                                                    onClick={() => startDownload(selectedGame.title, selectedGame.url, selectedGame.cover_url, selectedGame.size)}
-                                                >
-                                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
-                                                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                                                        <polyline points="7 10 12 15 17 10" />
-                                                        <line x1="12" y1="15" x2="12" y2="3" />
-                                                    </svg>
-                                                    <span>Baixar .CHD para PCSX2</span>
-                                                </button>
-                                            )}
+                                            {(() => {
+                                                const selectedInstalled = installedGames.find(g => g.id === (selectedGame.installedId || selectedGame.id) || g.file_path === selectedGame.installedPath);
+                                                const isSelectedMissing = Boolean(selectedInstalled?.is_missing);
+                                                if (selectedGame.isInstalled && selectedGame.installedPath) {
+                                                    if (isSelectedMissing) {
+                                                        return (
+                                                            <button
+                                                                className="sync-btn"
+                                                                style={{ width: "100%", padding: "0.75rem", opacity: 0.6, cursor: "not-allowed" }}
+                                                                disabled={true}
+                                                                title="O arquivo da ROM não foi localizado na pasta de jogos"
+                                                            >
+                                                                <svg viewBox="0 0 24 24" fill="currentColor" stroke="none">
+                                                                    <polygon points="6 4 20 12 6 20 6 4" />
+                                                                </svg>
+                                                                <span>Arquivo ausente no disco</span>
+                                                            </button>
+                                                        );
+                                                    }
+                                                    return (
+                                                        <button
+                                                            className="sync-btn"
+                                                            style={{ width: "100%", padding: "0.75rem" }}
+                                                            onClick={() => launchGame(selectedGame.installedPath!)}
+                                                        >
+                                                            <svg viewBox="0 0 24 24" fill="currentColor" stroke="none">
+                                                                <polygon points="6 4 20 12 6 20 6 4" />
+                                                            </svg>
+                                                            <span>Iniciar no PCSX2</span>
+                                                        </button>
+                                                    );
+                                                }
+                                                return (
+                                                    <button
+                                                        className="sync-btn"
+                                                        style={{ width: "100%", padding: "0.75rem" }}
+                                                        disabled={isStartingDownload}
+                                                        onClick={() => startDownload(selectedGame.title, selectedGame.url, selectedGame.cover_url, selectedGame.size)}
+                                                    >
+                                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+                                                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                                                            <polyline points="7 10 12 15 17 10" />
+                                                            <line x1="12" y1="15" x2="12" y2="3" />
+                                                        </svg>
+                                                        <span>Baixar .CHD para PCSX2</span>
+                                                    </button>
+                                                );
+                                            })()}
 
                                             <button
                                                 className="sync-btn secondary"
@@ -1584,6 +1787,34 @@ export default function App() {
                                                 </svg>
                                                 <span>{favorites.some(f => f.id === selectedGame.id) ? "Remover Favorito" : "Adicionar aos Favoritos"}</span>
                                             </button>
+
+                                            {selectedGame.isInstalled && (
+                                                <button
+                                                    type="button"
+                                                    className="sync-btn secondary"
+                                                    style={{ width: "100%", padding: "0.75rem" }}
+                                                    disabled={isVerifyingIntegrity}
+                                                    onClick={() => void checkIntegrity(selectedGame.installedId || selectedGame.id)}
+                                                >
+                                                    {isVerifyingIntegrity ? "Verificando integridade…" : "Verificar integridade"}
+                                                </button>
+                                            )}
+
+                                            {integrityResult && (
+                                                <div className="integrity-panel">
+                                                    <h4>Relatório de integridade física</h4>
+                                                    <div className={`integrity-status-badge ${integrityResult.healthy ? "healthy" : "unhealthy"}`}>
+                                                        {integrityResult.healthy ? "✓ Íntegro" : "⚠ Atenção"}
+                                                    </div>
+                                                    <p className="integrity-message">{integrityResult.message}</p>
+                                                    <div className="integrity-details">
+                                                        <div><span>Status no disco:</span><strong>{integrityResult.exists ? "Presente" : "Ausente"}</strong></div>
+                                                        <div><span>Formato válido:</span><strong>{integrityResult.valid_format ? integrityResult.format.toUpperCase() : "Inválido"}</strong></div>
+                                                        <div><span>Tamanho conferido:</span><strong>{integrityResult.size_matches ? "Compatível" : "Diferente"}</strong></div>
+                                                        {integrityResult.serial && <div><span>Serial extraído:</span><strong>{integrityResult.serial}</strong></div>}
+                                                    </div>
+                                                </div>
+                                            )}
 
                                             {selectedGame.isInstalled && (
                                                 <button

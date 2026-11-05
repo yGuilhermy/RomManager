@@ -16,7 +16,7 @@ export async function apiFetch(path: string, options?: RequestInit): Promise<Res
             if (!response.ok) {
                 const body = await response.text();
                 let message = body || `Erro HTTP ${response.status}`;
-                try { const data = JSON.parse(body); message = data.error || data.message || message; } catch { /* Backend errors may be plain text. */ }
+                try { const data = JSON.parse(body); message = data.error || data.message || message; } catch {}
                 throw new ApiError(response.status, message);
             }
             return response;

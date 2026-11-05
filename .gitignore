@@ -1,4 +1,8 @@
 target/
+tasks/
+scripts/
+docs/
+tests/
 core/target/
 apps/desktop/src-tauri/target/
 dist/

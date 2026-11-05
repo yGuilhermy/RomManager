@@ -194,7 +194,6 @@ async fn fetch_cover(
                 (h ^ (b as u64)).wrapping_mul(0x100000001b3)
             });
             let name = format!("rommanager_{hash:016x}.{extension}");
-            // Generated covers have a dedicated name; user-supplied title/serial files are preserved.
             let temp = directory.join(format!("rommanager_{hash:016x}.tmp"));
             tokio::fs::write(&temp, &data)
                 .await
@@ -233,6 +232,7 @@ mod tests {
             )),
             logs: Arc::new(std::sync::Mutex::new(vec![])),
             cover_job: Arc::new(std::sync::Mutex::new(CoverJob::default())),
+            job_manager: Arc::new(crate::jobs::JobManager::new(db.clone())),
         });
         let _started = start(State(state.clone())).await.unwrap();
         for _ in 0..200 {

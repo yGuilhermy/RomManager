@@ -170,7 +170,6 @@ async fn legacy_windows_duplicates_are_merged_and_repeated_scans_are_idempotent(
     };
     let db = root.join("test.db");
     let conn = Connection::open(&db).unwrap();
-    // Reproduce a pre-migration database, including both spellings of the same file.
     conn.execute_batch("CREATE TABLE games(id TEXT PRIMARY KEY,title TEXT NOT NULL,filename TEXT NOT NULL,file_path TEXT NOT NULL,file_size INTEGER NOT NULL,format TEXT NOT NULL,cover_url TEXT,region TEXT,serial TEXT,date_added TEXT NOT NULL); CREATE TABLE game_progress(game_id TEXT PRIMARY KEY,status TEXT NOT NULL,notes TEXT NOT NULL,launches INTEGER NOT NULL,last_played TEXT); CREATE TABLE favorites(id TEXT PRIMARY KEY,title TEXT NOT NULL,cover_url TEXT,url TEXT NOT NULL,size INTEGER,region TEXT,added_at TEXT NOT NULL);").unwrap();
     for (id, path, date, cover) in [
         ("legacy", &regular, "2025-01-01T00:00:00Z", None),

@@ -1,0 +1,241 @@
+use chrono::Utc;
+use rusqlite::{Connection, Result, params};
+use std::collections::HashMap;
+use std::path::Path;
+
+pub fn initialize_db(db_path: &Path) -> Result<Connection> {
+    let mut conn = Connection::open(db_path)?;
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS game_progress (
+            game_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'planned',
+            notes TEXT NOT NULL DEFAULT '',
+            launches INTEGER NOT NULL DEFAULT 0,
+            last_played TEXT
+        );
+        CREATE TABLE IF NOT EXISTS configs (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS games (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            path_key TEXT,
+            file_size INTEGER NOT NULL,
+            format TEXT NOT NULL,
+            cover_url TEXT,
+            region TEXT,
+            serial TEXT,
+            date_added TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS downloads (
+            id TEXT PRIMARY KEY,
+            game_title TEXT NOT NULL,
+            url TEXT NOT NULL,
+            cover_url TEXT,
+            status TEXT NOT NULL,
+            progress REAL NOT NULL,
+            speed REAL NOT NULL,
+            size INTEGER NOT NULL,
+            downloaded_bytes INTEGER NOT NULL,
+            error_message TEXT,
+            target_path TEXT,
+            connections INTEGER DEFAULT 1
+        );
+
+        CREATE TABLE IF NOT EXISTS favorites (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            cover_url TEXT,
+            url TEXT NOT NULL,
+            size INTEGER,
+            region TEXT,
+            added_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            game_name TEXT NOT NULL,
+            action TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            details TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS game_metadata (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            description TEXT,
+            source TEXT,
+            updated_at TEXT NOT NULL
+        );",
+    )?;
+
+    let _ = conn.execute(
+        "ALTER TABLE downloads ADD COLUMN connections INTEGER DEFAULT 1",
+        [],
+    );
+
+    seed_default_configs(&conn)?;
+    let has_path_key: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('games') WHERE name='path_key')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has_path_key {
+        conn.execute("ALTER TABLE games ADD COLUMN path_key TEXT", [])?;
+    }
+    crate::rom_scanner::normalize_library(&mut conn)
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(e))))?;
+
+    Ok(conn)
+}
+
+fn seed_default_configs(conn: &Connection) -> Result<()> {
+    let defaults = [
+        ("roms_dir", ""),
+        ("roms_directory", ""),
+        ("pcsx2_path", "C:\\Program Files\\PCSX2\\pcsx2-qt.exe"),
+        (
+            "pcsx2_executable_path",
+            "C:\\Program Files\\PCSX2\\pcsx2-qt.exe",
+        ),
+        ("covers_dir", ""),
+        ("covers_directory", ""),
+        ("auto_download_covers", "true"),
+        ("dark_mode", "true"),
+        ("max_concurrent_downloads", "2"),
+    ];
+
+    for (k, v) in defaults.iter() {
+        conn.execute(
+            "INSERT INTO configs (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE value = ''",
+            params![k, v],
+        )?;
+    }
+
+    Ok(())
+}
+
+pub fn get_config(conn: &Connection, key: &str) -> Option<String> {
+    let val: Option<String> = conn
+        .query_row(
+            "SELECT value FROM configs WHERE key = ?1",
+            params![key],
+            |row| row.get(0),
+        )
+        .ok();
+
+    if let Some(v) = val {
+        if !v.is_empty() {
+            return Some(v);
+        }
+    }
+
+    let alias = match key {
+        "roms_dir" => Some("roms_directory"),
+        "roms_directory" => Some("roms_dir"),
+        "pcsx2_path" => Some("pcsx2_executable_path"),
+        "pcsx2_executable_path" => Some("pcsx2_path"),
+        "covers_dir" => Some("covers_directory"),
+        "covers_directory" => Some("covers_dir"),
+        _ => None,
+    };
+
+    if let Some(a) = alias {
+        return conn
+            .query_row(
+                "SELECT value FROM configs WHERE key = ?1",
+                params![a],
+                |row| row.get(0),
+            )
+            .ok();
+    }
+
+    None
+}
+
+pub fn set_config(conn: &Connection, key: &str, value: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO configs (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )?;
+
+    let alias = match key {
+        "roms_dir" => Some("roms_directory"),
+        "roms_directory" => Some("roms_dir"),
+        "pcsx2_path" => Some("pcsx2_executable_path"),
+        "pcsx2_executable_path" => Some("pcsx2_path"),
+        "covers_dir" => Some("covers_directory"),
+        "covers_directory" => Some("covers_dir"),
+        _ => None,
+    };
+
+    if let Some(a) = alias {
+        conn.execute(
+            "INSERT INTO configs (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![a, value],
+        )?;
+    }
+
+    Ok(())
+}
+
+pub fn get_all_configs(conn: &Connection) -> Result<HashMap<String, String>> {
+    let mut stmt = conn.prepare("SELECT key, value FROM configs")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+
+    let mut map = HashMap::new();
+    for r in rows.flatten() {
+        map.insert(r.0, r.1);
+    }
+    Ok(map)
+}
+
+pub fn add_history(
+    conn: &Connection,
+    game_name: &str,
+    action: &str,
+    details: Option<&str>,
+) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO history (game_name, action, timestamp, details) VALUES (?1, ?2, ?3, ?4)",
+        params![game_name, action, now, details],
+    )?;
+    Ok(())
+}
+
+pub fn get_game_metadata(conn: &Connection, id: &str) -> Option<(String, String)> {
+    conn.query_row(
+        "SELECT description, source FROM game_metadata WHERE id = ?1",
+        params![id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .ok()
+}
+
+pub fn save_game_metadata(
+    conn: &Connection,
+    id: &str,
+    title: &str,
+    description: &str,
+    source: &str,
+) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO game_metadata (id, title, description, source, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(id) DO UPDATE SET description = excluded.description, source = excluded.source, updated_at = excluded.updated_at",
+        params![id, title, description, source, now],
+    )?;
+    Ok(())
+}

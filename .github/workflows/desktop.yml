@@ -1,0 +1,33 @@
+name: Desktop checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  desktop:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: Select Rust stable
+        run: rustup default stable
+      - name: Install frontend dependencies
+        run: npm ci --prefix apps/desktop
+      - name: Core tests
+        run: cargo test --locked --manifest-path core/Cargo.toml
+      - name: Frontend tests
+        run: npm test --prefix apps/desktop
+      - name: Frontend build
+        run: npm run build --prefix apps/desktop
+      - name: Native desktop check
+        run: cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
+      - name: Dependency audit
+        run: npm audit --prefix apps/desktop

@@ -5,7 +5,7 @@ interface Props {
     validations:[ValidationResult|null,ValidationResult|null,ValidationResult|null];
     onSaveRoms:()=>Promise<void>; onSaveEmulator:()=>Promise<void>; onSaveCovers:()=>Promise<void>;
     onSaveAutoCovers:(value:boolean)=>Promise<void>; onSaveMaxConcurrent?:(value:string)=>Promise<void>; onOpenFolder:(path:string)=>Promise<void>;
-    onRegenerate:()=>Promise<void>; covers:CoverJob|null; logs:string[]; onRefreshLogs:()=>void; onClearLogs:()=>Promise<void>; version:string;
+    onRegenerate:()=>Promise<void>; covers:CoverJob|null; logs:string[]; onRefreshLogs:()=>void; onClearLogs:()=>Promise<void>; version:string; onOpenWizard?:()=>void;
 }
 export function SettingsPage(props:Props) {
     const [savingPreference,setSavingPreference]=useState(false);
@@ -15,7 +15,7 @@ export function SettingsPage(props:Props) {
         {key:"covers_directory",label:"Pasta de capas",hint:"Imagens pessoais são preservadas durante a regeneração.",placeholder:"D:\\Jogos\\PS2\\covers",save:props.onSaveCovers,validation:props.validations[2]},
     ];
     return <div className="settings-page-v2">
-        <header className="page-heading"><div><h2>Configurações</h2><p>Biblioteca, emulador e capas.</p></div></header>
+        <header className="page-heading settings-page-header"><div><h2>Configurações</h2><p>Biblioteca, emulador e capas</p></div>{props.onOpenWizard && <button type="button" className="button-secondary" onClick={props.onOpenWizard}>Refazer configurações iniciais</button>}</header>
         <section className="panel settings-paths"><h3>Biblioteca e emulador</h3>
             {fields.map(field=><div className="settings-field" key={field.key}>
                 <label htmlFor={`settings-${field.key}`}>{field.label}</label><p id={`hint-${field.key}`} className="field-hint">{field.hint}</p>

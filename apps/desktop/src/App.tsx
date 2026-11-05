@@ -214,6 +214,24 @@ export default function App() {
     const [coversValidation, setCoversValidation] = useState<ValidationResult | null>(null);
     const [logs, setLogs] = useState<string[]>([]);
 
+    const [showSetupWizard, setShowSetupWizard] = useState<boolean>(() => {
+        try {
+            return localStorage.getItem("setup_done") !== "1";
+        } catch {
+            return true;
+        }
+    });
+    const [wizardStep, setWizardStep] = useState<number>(0);
+    const [wizardRomsDir, setWizardRomsDir] = useState<string>("");
+    const [wizardPcsx2Path, setWizardPcsx2Path] = useState<string>("");
+    const [wizardCoversDir, setWizardCoversDir] = useState<string>("");
+    const [wizardAutoCovers, setWizardAutoCovers] = useState<boolean>(true);
+    const [wizardMaxConcurrent, setWizardMaxConcurrent] = useState<string>("2");
+    const [wizardIsFinishing, setWizardIsFinishing] = useState<boolean>(false);
+    const [wizardRomsCheck, setWizardRomsCheck] = useState<ValidationResult | null>(null);
+    const [wizardPcsx2Check, setWizardPcsx2Check] = useState<ValidationResult | null>(null);
+    const [wizardCoversCheck, setWizardCoversCheck] = useState<ValidationResult | null>(null);
+
     const [favorites, setFavorites] = useState<FavoriteItem[]>([]);
     const [history, setHistory] = useState<HistoryItem[]>([]);
 
@@ -865,6 +883,125 @@ export default function App() {
         try {await apiFetch("/api/logs",{method:"DELETE"});await fetchLogs();showToast("Logs limpos.","success");}
         catch(error){showToast(error instanceof Error?error.message:"Não foi possível limpar os logs.","error");}
     };
+
+    const handleWizardSkipAll = useCallback(() => {
+        try { localStorage.setItem("setup_done", "1"); } catch {}
+        setShowSetupWizard(false);
+    }, []);
+
+    useEffect(() => {
+        if (!showSetupWizard) return;
+        const onKeyDown = (event: KeyboardEvent) => {
+            if (event.key === "Escape" && !wizardIsFinishing) {
+                handleWizardSkipAll();
+            }
+        };
+        window.addEventListener("keydown", onKeyDown);
+        return () => window.removeEventListener("keydown", onKeyDown);
+    }, [showSetupWizard, wizardIsFinishing, handleWizardSkipAll]);
+
+    const checkWizardPath = async (kind: "roms-dir" | "pcsx2-exe" | "covers-dir", rawPath: string) => {
+        const trimmed = rawPath.trim();
+        const setter = kind === "roms-dir" ? setWizardRomsCheck : kind === "pcsx2-exe" ? setWizardPcsx2Check : setWizardCoversCheck;
+        if (!trimmed) {
+            setter(null);
+            return;
+        }
+        try {
+            const result = await apiJson<ValidationResult>(`/api/config/validate-${kind}?path=${encodeURIComponent(trimmed)}`);
+            setter(result);
+        } catch {
+            setter({ valid: false, message: "Não foi possível validar este caminho." });
+        }
+    };
+
+    const handleOpenWizard = () => {
+        setWizardRomsDir(configs.roms_directory || "");
+        setWizardPcsx2Path(pcsx2Validation?.valid ? (configs.pcsx2_executable_path || "") : "");
+        setWizardCoversDir(configs.covers_directory || "");
+        setWizardAutoCovers(configs.auto_download_covers !== "false");
+        setWizardMaxConcurrent(configs.max_concurrent_downloads || "2");
+        setWizardRomsCheck(configs.roms_directory ? romsValidation : null);
+        setWizardPcsx2Check(pcsx2Validation?.valid ? pcsx2Validation : null);
+        setWizardCoversCheck(configs.covers_directory ? coversValidation : null);
+        setWizardStep(0);
+        setShowSetupWizard(true);
+    };
+
+    const handleWizardNext = async () => {
+        if (wizardStep < 3) {
+            setWizardStep(prev => prev + 1);
+            return;
+        }
+        setWizardIsFinishing(true);
+        const saveConfigKey = (key: string, value: string) =>
+            apiFetch("/api/config", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ key, value })
+            }).catch(() => {});
+
+        await saveConfigKey("auto_download_covers", String(wizardAutoCovers));
+        await saveConfigKey("max_concurrent_downloads", wizardMaxConcurrent);
+        setConfigs(current => ({
+            ...current,
+            auto_download_covers: String(wizardAutoCovers),
+            max_concurrent_downloads: wizardMaxConcurrent
+        }));
+
+        if (wizardRomsDir.trim()) {
+            const romsPath = wizardRomsDir.trim();
+            try {
+                const vRes = await apiJson<ValidationResult>(`/api/config/validate-roms-dir?path=${encodeURIComponent(romsPath)}`);
+                setRomsValidation(vRes);
+                if (vRes.valid) {
+                    await saveConfigKey("roms_directory", romsPath);
+                    setConfigs(current => ({ ...current, roms_directory: romsPath }));
+                    void scanGames();
+                } else {
+                    showToast(`Pasta de ROMs inválida: ${vRes.message}. Configure depois em Configurações.`, "warning");
+                }
+            } catch {
+                showToast("Não foi possível validar a pasta de ROMs. Configure depois em Configurações.", "warning");
+            }
+        }
+
+        if (wizardPcsx2Path.trim()) {
+            const pcsx2Path = wizardPcsx2Path.trim();
+            try {
+                const vRes = await apiJson<ValidationResult>(`/api/config/validate-pcsx2-exe?path=${encodeURIComponent(pcsx2Path)}`);
+                setPcsx2Validation(vRes);
+                if (vRes.valid) {
+                    await saveConfigKey("pcsx2_executable_path", pcsx2Path);
+                    setConfigs(current => ({ ...current, pcsx2_executable_path: pcsx2Path }));
+                } else {
+                    showToast(`Executável do PCSX2 inválido: ${vRes.message}. Configure depois em Configurações.`, "warning");
+                }
+            } catch {
+                showToast("Não foi possível validar o executável do PCSX2. Configure depois em Configurações.", "warning");
+            }
+        }
+
+        if (wizardCoversDir.trim()) {
+            const coversPath = wizardCoversDir.trim();
+            try {
+                const vRes = await apiJson<ValidationResult>(`/api/config/validate-covers-dir?path=${encodeURIComponent(coversPath)}`);
+                setCoversValidation(vRes);
+                if (vRes.valid) {
+                    await saveConfigKey("covers_directory", coversPath);
+                    setConfigs(current => ({ ...current, covers_directory: coversPath }));
+                } else {
+                    showToast(`Pasta de capas inválida: ${vRes.message}. Configure depois em Configurações.`, "warning");
+                }
+            } catch {
+                showToast("Não foi possível validar a pasta de capas. Configure depois em Configurações.", "warning");
+            }
+        }
+
+        try { localStorage.setItem("setup_done", "1"); } catch {}
+        setShowSetupWizard(false);
+        setWizardIsFinishing(false);
+    };
     useEffect(()=>{const controller=new AbortController();void apiJson<CoverJob>("/api/games/covers/regenerate",{signal:controller.signal}).then(setCoverJob).catch(()=>undefined);return()=>controller.abort();},[]);
     useEffect(()=>{
         if(!coverJob?.running)return;
@@ -1166,7 +1303,7 @@ export default function App() {
                         busy={isSavingConfig} validations={[romsValidation,pcsx2Validation,coversValidation]}
                         onSaveRoms={handleSaveRomsDir} onSaveEmulator={handleSavePcsx2Exe} onSaveCovers={handleSaveCoversDir}
                         onSaveAutoCovers={saveAutoCovers} onSaveMaxConcurrent={saveMaxConcurrent} onOpenFolder={openFolder} onRegenerate={regenerateCovers} covers={coverJob}
-                        logs={logs} onRefreshLogs={()=>void fetchLogs()} onClearLogs={clearLogs} version={packageInfo.version} />}
+                        logs={logs} onRefreshLogs={()=>void fetchLogs()} onClearLogs={clearLogs} version={packageInfo.version} onOpenWizard={handleOpenWizard} />}
                     {activeTab === "profile" && <ProfilePage installed={installedGames} favorites={favorites} history={history}
                         onOpenGame={openInstalledGame} onOpenFavorite={favorite=>openGameDetail({...favorite,filename:"",cover_url:favorite.cover_url || "",size:favorite.size || 0,region:favorite.region || "",part:""})}
                         onRemoveFavorite={async favorite=>{await apiFetch(`/api/favorites/${encodeURIComponent(favorite.id)}`,{method:"DELETE"});await fetchFavorites();}}
@@ -1519,6 +1656,276 @@ export default function App() {
                     </div>
                 )}
             </main>
+
+            {showSetupWizard && (
+                <div className="setup-wizard-overlay" role="dialog" aria-modal="true" aria-labelledby="wizard-dialog-title">
+                    <div className="setup-wizard-card">
+                        <div className="wizard-progress-track" aria-hidden="true">
+                            <div className="wizard-progress-fill" style={{ transform: `scaleX(${(wizardStep + 1) / 4})` }} />
+                        </div>
+
+                        <div className="wizard-topbar">
+                            <nav className="wizard-steps-dots" aria-label="Etapas da configuração inicial">
+                                {(["Visão geral", "Pasta de ROMs", "Emulador PCSX2", "Capas e fila"] as const).map((label, i) => (
+                                    <button
+                                        key={label}
+                                        type="button"
+                                        className={`wizard-step-pill${i === wizardStep ? " active" : i < wizardStep ? " done" : ""}`}
+                                        disabled={wizardIsFinishing}
+                                        aria-current={i === wizardStep ? "step" : undefined}
+                                        onClick={() => setWizardStep(i)}
+                                    >
+                                        <span className="wizard-dot" aria-hidden="true">
+                                            {i < wizardStep ? (
+                                                <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                                    <polyline points="13 4.5 6.5 11 3 7.5" />
+                                                </svg>
+                                            ) : (i + 1)}
+                                        </span>
+                                        <span className="wizard-step-name">{label}</span>
+                                    </button>
+                                ))}
+                            </nav>
+                            <span className="wizard-step-counter">Etapa {wizardStep + 1} de 4</span>
+                        </div>
+
+                        <div key={wizardStep} className="wizard-step-content">
+                            {wizardStep === 0 && (
+                                <div className="wizard-welcome">
+                                    <div className="wizard-brand-header">
+                                        <div className="wizard-logo-wrap">
+                                            <img src={logoUrl} alt="" width="48" height="48" className="wizard-logo" />
+                                        </div>
+                                        <div className="wizard-brand-copy">
+                                            <div className="wizard-brand-title-row">
+                                                <h2 id="wizard-dialog-title" className="wizard-title">RomManager</h2>
+                                                <span className="wizard-version-meta">v{packageInfo.version}</span>
+                                            </div>
+                                            <p className="wizard-subtitle">Gerenciador local de ROMs de PlayStation 2 com acervo 1G1R integrado, fila de downloads em lote e execução direta no PCSX2.</p>
+                                        </div>
+                                    </div>
+
+                                    <div className="wizard-feature-cards">
+                                        <div className="wizard-feature-card">
+                                            <span className="wizard-feature-icon" aria-hidden="true">
+                                                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                                                    <circle cx="12" cy="12" r="9" />
+                                                    <circle cx="12" cy="12" r="2.5" />
+                                                </svg>
+                                            </span>
+                                            <div>
+                                                <strong>Biblioteca sincronizada por serial</strong>
+                                                <p>Leitura local dos arquivos da pasta de jogos com detecção de região, código serial (SLUS, SCUS, SLES) e vínculo automático de capas.</p>
+                                            </div>
+                                        </div>
+                                        <div className="wizard-feature-card">
+                                            <span className="wizard-feature-icon" aria-hidden="true">
+                                                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                                                    <polyline points="7 10 12 15 17 10" />
+                                                    <line x1="12" y1="15" x2="12" y2="3" />
+                                                </svg>
+                                            </span>
+                                            <div>
+                                                <strong>Catálogo 1G1R e fila em lote</strong>
+                                                <p>Seleção múltipla de títulos do Internet Archive e consulta sob demanda de traduções, com controle de downloads simultâneos.</p>
+                                            </div>
+                                        </div>
+                                        <div className="wizard-feature-card">
+                                            <span className="wizard-feature-icon" aria-hidden="true">
+                                                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                                                    <polygon points="6 4 20 12 6 20 6 4" />
+                                                </svg>
+                                            </span>
+                                            <div>
+                                                <strong>Inicialização direta no PCSX2</strong>
+                                                <p>Abertura imediata da ROM selecionada no emulador com registro local das sessões recentes no perfil.</p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
+                            {wizardStep === 1 && (
+                                <div className="wizard-section">
+                                    <div className="wizard-section-head">
+                                        <h2 id="wizard-dialog-title" className="wizard-title">Pasta de ROMs</h2>
+                                        <p className="wizard-subtitle">Defina o diretório onde seus jogos de PlayStation 2 estão salvos e onde novos downloads serão instalados.</p>
+                                    </div>
+
+                                    <div className="wizard-input-group">
+                                        <label htmlFor="wizard-roms-dir">Caminho da pasta de ROMs</label>
+                                        <div className="wizard-input-row">
+                                            <input
+                                                id="wizard-roms-dir"
+                                                type="text"
+                                                placeholder="D:\Jogos\PS2"
+                                                value={wizardRomsDir}
+                                                onChange={e => { setWizardRomsDir(e.target.value); setWizardRomsCheck(null); }}
+                                                className="wizard-dir-input"
+                                            />
+                                            <button
+                                                type="button"
+                                                className="button-secondary"
+                                                disabled={!wizardRomsDir.trim()}
+                                                onClick={() => void checkWizardPath("roms-dir", wizardRomsDir)}
+                                            >
+                                                Validar
+                                            </button>
+                                        </div>
+                                        {wizardRomsCheck ? (
+                                            <p className={`field-validation ${wizardRomsCheck.valid ? "valid" : "invalid"}`} role="status">
+                                                {wizardRomsCheck.valid ? "✓" : "!"} {wizardRomsCheck.message}
+                                            </p>
+                                        ) : (
+                                            <span className="wizard-input-hint">Opcional agora. Você pode definir ou alterar este caminho depois em Configurações.</span>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
+
+                            {wizardStep === 2 && (
+                                <div className="wizard-section">
+                                    <div className="wizard-section-head">
+                                        <h2 id="wizard-dialog-title" className="wizard-title">Emulador PCSX2</h2>
+                                        <p className="wizard-subtitle">Informe o caminho completo do executável do PCSX2 para iniciar os jogos diretamente pela biblioteca.</p>
+                                    </div>
+
+                                    <div className="wizard-input-group">
+                                        <label htmlFor="wizard-pcsx2-exe">Executável do PCSX2 (pcsx2-qt.exe ou pcsx2.exe)</label>
+                                        <div className="wizard-input-row">
+                                            <input
+                                                id="wizard-pcsx2-exe"
+                                                type="text"
+                                                placeholder="C:\Program Files\PCSX2\pcsx2-qt.exe"
+                                                value={wizardPcsx2Path}
+                                                onChange={e => { setWizardPcsx2Path(e.target.value); setWizardPcsx2Check(null); }}
+                                                className="wizard-dir-input"
+                                            />
+                                            <button
+                                                type="button"
+                                                className="button-secondary"
+                                                disabled={!wizardPcsx2Path.trim()}
+                                                onClick={() => void checkWizardPath("pcsx2-exe", wizardPcsx2Path)}
+                                            >
+                                                Validar
+                                            </button>
+                                        </div>
+                                        {wizardPcsx2Check ? (
+                                            <p className={`field-validation ${wizardPcsx2Check.valid ? "valid" : "invalid"}`} role="status">
+                                                {wizardPcsx2Check.valid ? "✓" : "!"} {wizardPcsx2Check.message}
+                                            </p>
+                                        ) : (
+                                            <span className="wizard-input-hint">Deixe em branco caso prefira configurar o emulador mais tarde.</span>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
+
+                            {wizardStep === 3 && (
+                                <div className="wizard-section">
+                                    <div className="wizard-section-head">
+                                        <h2 id="wizard-dialog-title" className="wizard-title">Capas e fila de downloads</h2>
+                                        <p className="wizard-subtitle">Ajuste a busca automática de capas e o limite de transferências simultâneas.</p>
+                                    </div>
+
+                                    <div className="wizard-settings-stack">
+                                        <div className="wizard-toggle-row">
+                                            <div>
+                                                <label htmlFor="wizard-auto-covers" className="wizard-row-title">Buscar capas automaticamente</label>
+                                                <p>Baixa capas ausentes durante a sincronização da biblioteca usando o serial ou título do jogo.</p>
+                                            </div>
+                                            <label className="wizard-switch" htmlFor="wizard-auto-covers">
+                                                <input
+                                                    id="wizard-auto-covers"
+                                                    type="checkbox"
+                                                    checked={wizardAutoCovers}
+                                                    onChange={e => setWizardAutoCovers(e.target.checked)}
+                                                />
+                                                <span className="wizard-switch-slider" />
+                                            </label>
+                                        </div>
+                                        <div className="wizard-select-row">
+                                            <div>
+                                                <label htmlFor="wizard-max-concurrent" className="wizard-row-title">Downloads simultâneos na fila</label>
+                                                <p>Quantidade de jogos baixados e extraídos ao mesmo tempo na seleção em lote.</p>
+                                            </div>
+                                            <select
+                                                id="wizard-max-concurrent"
+                                                value={wizardMaxConcurrent}
+                                                onChange={e => setWizardMaxConcurrent(e.target.value)}
+                                                className="wizard-select"
+                                            >
+                                                <option value="1">1 por vez (menor uso)</option>
+                                                <option value="2">2 simultâneos (padrão)</option>
+                                                <option value="3">3 simultâneos</option>
+                                                <option value="4">4 simultâneos</option>
+                                                <option value="5">5 simultâneos (rápido)</option>
+                                            </select>
+                                        </div>
+                                    </div>
+
+                                    <div className="wizard-input-group">
+                                        <label htmlFor="wizard-covers-dir">Pasta de capas personalizada (opcional)</label>
+                                        <div className="wizard-input-row">
+                                            <input
+                                                id="wizard-covers-dir"
+                                                type="text"
+                                                placeholder="D:\Jogos\PS2\covers"
+                                                value={wizardCoversDir}
+                                                onChange={e => { setWizardCoversDir(e.target.value); setWizardCoversCheck(null); }}
+                                                className="wizard-dir-input"
+                                            />
+                                            <button
+                                                type="button"
+                                                className="button-secondary"
+                                                disabled={!wizardCoversDir.trim()}
+                                                onClick={() => void checkWizardPath("covers-dir", wizardCoversDir)}
+                                            >
+                                                Validar
+                                            </button>
+                                        </div>
+                                        {wizardCoversCheck ? (
+                                            <p className={`field-validation ${wizardCoversCheck.valid ? "valid" : "invalid"}`} role="status">
+                                                {wizardCoversCheck.valid ? "✓" : "!"} {wizardCoversCheck.message}
+                                            </p>
+                                        ) : (
+                                            <span className="wizard-input-hint">Deixe em branco para usar a pasta padrão gerenciada pelo aplicativo.</span>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="wizard-footer">
+                            <p className="wizard-footer-note">Alterável a qualquer momento em <strong>Configurações</strong></p>
+                            <div className="wizard-footer-actions">
+                                <button type="button" className="wizard-skip-all-btn" disabled={wizardIsFinishing} onClick={handleWizardSkipAll}>
+                                    Configurar depois
+                                </button>
+                                {wizardStep > 0 && (
+                                    <button
+                                        type="button"
+                                        className="wizard-skip-all-btn"
+                                        disabled={wizardIsFinishing}
+                                        onClick={() => setWizardStep(prev => Math.max(0, prev - 1))}
+                                    >
+                                        Voltar
+                                    </button>
+                                )}
+                                <button
+                                    type="button"
+                                    className="wizard-next-btn"
+                                    onClick={() => void handleWizardNext()}
+                                    disabled={wizardIsFinishing}
+                                >
+                                    {wizardIsFinishing ? "Salvando…" : wizardStep === 0 ? "Começar configuração" : wizardStep === 3 ? "Salvar e concluir" : "Continuar"}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

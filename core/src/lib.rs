@@ -5,6 +5,7 @@ pub mod download_manager;
 pub mod exe_runner;
 pub mod game_metadata;
 pub mod jobs;
+pub mod pcsx2;
 pub mod profile;
 pub mod rom_scanner;
 
@@ -25,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tower_http::cors::{Any, CorsLayer};
 
@@ -219,6 +220,30 @@ pub async fn start_api() {
         .route("/api/jobs", get(list_jobs_handler).post(create_job_handler))
         .route("/api/jobs/:id", get(get_job_handler).delete(delete_job_handler))
         .route("/api/jobs/:id/cancel", post(cancel_job_handler))
+        .route("/api/pcsx2/detect", get(pcsx2_detect_handler))
+        .route("/api/pcsx2/diagnostic", get(pcsx2_diagnostic_handler))
+        .route(
+            "/api/pcsx2/profiles",
+            get(pcsx2_list_profiles_handler).post(pcsx2_save_profile_handler),
+        )
+        .route(
+            "/api/pcsx2/profiles/:id/activate",
+            post(pcsx2_activate_profile_handler),
+        )
+        .route(
+            "/api/pcsx2/profiles/:id",
+            delete(pcsx2_delete_profile_handler),
+        )
+        .route("/api/pcsx2/bios", get(pcsx2_list_bios_handler))
+        .route("/api/pcsx2/bios/import", post(pcsx2_import_bios_handler))
+        .route("/api/pcsx2/bios/select", post(pcsx2_select_bios_handler))
+        .route("/api/pcsx2/releases", get(pcsx2_list_releases_handler))
+        .route("/api/pcsx2/install", post(pcsx2_install_release_handler))
+        .route("/api/pcsx2/version/select", post(pcsx2_select_version_handler))
+        .route(
+            "/api/pcsx2/covers/export",
+            post(pcsx2_export_covers_handler),
+        )
         .route("/api/favorites", get(list_favorites).post(add_favorite))
         .route("/api/favorites/:id", delete(delete_favorite))
         .route(
@@ -518,9 +543,25 @@ async fn run_game_direct(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<DirectRunPayload>,
 ) -> (StatusCode, String) {
-    let pcsx2_path_str = {
+    let clean_game_path = pcsx2::sanitize_path(&payload.game_path);
+    if clean_game_path.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Caminho do jogo não informado".to_string(),
+        );
+    }
+
+    let (pcsx2_path_str, fullscreen, active_profile) = {
         if let Ok(conn) = rusqlite::Connection::open(&state.db_path) {
-            database::get_config(&conn, "pcsx2_path").unwrap_or_default()
+            let prof = pcsx2::get_active_profile(&conn).ok();
+            let p_exe = prof
+                .as_ref()
+                .map(|p| pcsx2::sanitize_path(&p.executable_path))
+                .filter(|s| !s.is_empty())
+                .or_else(|| database::get_config(&conn, "pcsx2_path").map(|s| pcsx2::sanitize_path(&s)))
+                .unwrap_or_default();
+            let fs_flag = prof.as_ref().map(|p| p.fullscreen).unwrap_or(false);
+            (p_exe, fs_flag, prof)
         } else {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -532,19 +573,37 @@ async fn run_game_direct(
     if pcsx2_path_str.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
-            "Executável do PCSX2 não configurado".to_string(),
+            "Executável do PCSX2 não configurado nas Configurações ou Perfil.".to_string(),
         );
     }
 
     let p_exe = PathBuf::from(&pcsx2_path_str);
-    let p_rom = PathBuf::from(&payload.game_path);
+    let p_rom = PathBuf::from(&clean_game_path);
 
-    match exe_runner::launch_pcsx2(&p_exe, &p_rom) {
+    if !p_rom.exists() || !p_rom.is_file() {
+        return (
+            StatusCode::NOT_FOUND,
+            format!("O arquivo da ROM não existe no disco: '{}'", clean_game_path),
+        );
+    }
+
+    if !exe_runner::validate_pcsx2_executable(&p_exe) {
+        return (
+            StatusCode::NOT_FOUND,
+            format!("O executável do PCSX2 não foi encontrado ou é inválido: '{}'", pcsx2_path_str),
+        );
+    }
+
+    if let Some(ref prof) = active_profile {
+        let _ = pcsx2::apply_profile_to_ini(prof);
+    }
+
+    match exe_runner::launch_pcsx2_with_args(&p_exe, &p_rom, fullscreen) {
         Ok(_) => {
             let mut logs = state.logs.lock().unwrap();
-            logs.push(format!("Jogo iniciado no emulador: {}", payload.game_path));
+            logs.push(format!("Jogo iniciado no emulador: {}", clean_game_path));
             if let Ok(mut conn) = rusqlite::Connection::open(&state.db_path) {
-                let _ = profile::record_launch(&mut conn, &payload.game_path);
+                let _ = profile::record_launch(&mut conn, &clean_game_path);
             }
             (StatusCode::OK, "Jogo iniciado com sucesso".to_string())
         }
@@ -556,17 +615,25 @@ async fn launch_game(
     AxumPath(id): AxumPath<String>,
     State(state): State<Arc<AppState>>,
 ) -> (StatusCode, String) {
-    let (pcsx2_path_str, file_path_str) = {
+    let (pcsx2_path_str, file_path_str, fullscreen, active_profile) = {
         if let Ok(conn) = rusqlite::Connection::open(&state.db_path) {
-            let p_exe = database::get_config(&conn, "pcsx2_path").unwrap_or_default();
+            let prof = pcsx2::get_active_profile(&conn).ok();
+            let p_exe = prof
+                .as_ref()
+                .map(|p| pcsx2::sanitize_path(&p.executable_path))
+                .filter(|s| !s.is_empty())
+                .or_else(|| database::get_config(&conn, "pcsx2_path").map(|s| pcsx2::sanitize_path(&s)))
+                .unwrap_or_default();
+            let fs_flag = prof.as_ref().map(|p| p.fullscreen).unwrap_or(false);
             let rom_p = conn
                 .query_row(
                     "SELECT file_path FROM games WHERE id = ?1",
                     rusqlite::params![id],
                     |row| row.get::<_, String>(0),
                 )
+                .map(|s| pcsx2::sanitize_path(&s))
                 .unwrap_or_default();
-            (p_exe, rom_p)
+            (p_exe, rom_p, fs_flag, prof)
         } else {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -585,7 +652,25 @@ async fn launch_game(
     let p_exe = PathBuf::from(&pcsx2_path_str);
     let rom_p = PathBuf::from(&file_path_str);
 
-    match exe_runner::launch_pcsx2(&p_exe, &rom_p) {
+    if !rom_p.exists() || !rom_p.is_file() {
+        return (
+            StatusCode::NOT_FOUND,
+            format!("O arquivo da ROM não existe no disco: '{}'", file_path_str),
+        );
+    }
+
+    if !exe_runner::validate_pcsx2_executable(&p_exe) {
+        return (
+            StatusCode::NOT_FOUND,
+            format!("O executável do PCSX2 não foi encontrado ou é inválido: '{}'", pcsx2_path_str),
+        );
+    }
+
+    if let Some(ref prof) = active_profile {
+        let _ = pcsx2::apply_profile_to_ini(prof);
+    }
+
+    match exe_runner::launch_pcsx2_with_args(&p_exe, &rom_p, fullscreen) {
         Ok(_) => {
             let mut logs = state.logs.lock().unwrap();
             logs.push(format!("PCSX2 iniciado para: {}", rom_p.display()));
@@ -1143,6 +1228,402 @@ async fn delete_job_handler(
         Ok(false) => StatusCode::NOT_FOUND,
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
+}
+
+#[derive(Deserialize)]
+struct ImportBiosPayload {
+    source_path: String,
+}
+
+#[derive(Deserialize)]
+struct SelectBiosPayload {
+    bios_path: String,
+}
+
+#[derive(Deserialize)]
+struct SelectVersionPayload {
+    executable_path: String,
+    data_dir: Option<String>,
+    profile_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct InstallReleasePayload {
+    version: String,
+    download_url: Option<String>,
+    simulate_fail: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct ExportCoversPayload {
+    overwrite: Option<bool>,
+    pcsx2_covers_dir: Option<String>,
+}
+
+async fn pcsx2_detect_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<Vec<pcsx2::Pcsx2Installation>> {
+    let configured_path = if let Ok(conn) = rusqlite::Connection::open(&state.db_path) {
+        database::get_config(&conn, "pcsx2_path")
+    } else {
+        None
+    };
+    let data_root = state.db_path.parent();
+    Json(pcsx2::detect_installations(
+        configured_path.as_deref(),
+        data_root,
+    ))
+}
+
+async fn pcsx2_diagnostic_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<pcsx2::Pcsx2Diagnostic>, (StatusCode, String)> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    pcsx2::run_diagnostic(&conn)
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))
+}
+
+async fn pcsx2_list_profiles_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<pcsx2::Pcsx2Profile>>, (StatusCode, String)> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    pcsx2::list_profiles(&conn)
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))
+}
+
+async fn pcsx2_save_profile_handler(
+    State(state): State<Arc<AppState>>,
+    Json(profile): Json<pcsx2::Pcsx2Profile>,
+) -> Result<(StatusCode, String), (StatusCode, String)> {
+    let mut conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    match pcsx2::save_profile(&mut conn, &profile) {
+        Ok(_) => Ok((StatusCode::OK, "Perfil salvo com sucesso.".to_string())),
+        Err(e) => {
+            if e.contains("aberto") {
+                Err((StatusCode::CONFLICT, e))
+            } else if e.contains("vazio") {
+                Err((StatusCode::BAD_REQUEST, e))
+            } else {
+                Err((StatusCode::INTERNAL_SERVER_ERROR, e))
+            }
+        }
+    }
+}
+
+async fn pcsx2_activate_profile_handler(
+    AxumPath(id): AxumPath<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<(StatusCode, String), (StatusCode, String)> {
+    let mut conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    match pcsx2::set_active_profile(&mut conn, &id) {
+        Ok(_) => Ok((StatusCode::OK, "Perfil ativado com sucesso.".to_string())),
+        Err(e) => {
+            if e.contains("aberto") {
+                Err((StatusCode::CONFLICT, e))
+            } else if e.contains("não encontrado") {
+                Err((StatusCode::NOT_FOUND, e))
+            } else {
+                Err((StatusCode::INTERNAL_SERVER_ERROR, e))
+            }
+        }
+    }
+}
+
+async fn pcsx2_delete_profile_handler(
+    AxumPath(id): AxumPath<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<(StatusCode, String), (StatusCode, String)> {
+    let mut conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    match pcsx2::delete_profile(&mut conn, &id) {
+        Ok(_) => Ok((StatusCode::OK, "Perfil excluído com sucesso.".to_string())),
+        Err(e) => {
+            if e.contains("aberto") {
+                Err((StatusCode::CONFLICT, e))
+            } else {
+                Err((StatusCode::BAD_REQUEST, e))
+            }
+        }
+    }
+}
+
+async fn pcsx2_list_bios_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<pcsx2::BiosInfo>>, (StatusCode, String)> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let active_profile = pcsx2::get_active_profile(&conn).ok();
+    let bios_dir = database::get_config(&conn, "pcsx2_bios_dir")
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            active_profile.as_ref().map(|p| {
+                if !p.data_dir.is_empty() {
+                    PathBuf::from(&p.data_dir).join("bios")
+                } else if let Ok(insp) = pcsx2::inspect_installation(&PathBuf::from(&p.executable_path)) {
+                    PathBuf::from(insp.bios_dir)
+                } else {
+                    PathBuf::from(&p.executable_path)
+                        .parent()
+                        .unwrap_or(Path::new("."))
+                        .join("bios")
+                }
+            })
+        })
+        .unwrap_or_else(|| PathBuf::from("bios"));
+
+    let active_bios = active_profile.and_then(|p| p.bios_path);
+    Ok(Json(pcsx2::scan_bios_directory(
+        &bios_dir,
+        active_bios.as_deref(),
+    )))
+}
+
+async fn pcsx2_import_bios_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<ImportBiosPayload>,
+) -> Result<(StatusCode, Json<pcsx2::BiosImportResult>), (StatusCode, String)> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let active_profile = pcsx2::get_active_profile(&conn).ok();
+    let bios_dir = database::get_config(&conn, "pcsx2_bios_dir")
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            active_profile.as_ref().map(|p| {
+                if !p.data_dir.is_empty() {
+                    PathBuf::from(&p.data_dir).join("bios")
+                } else if let Ok(insp) = pcsx2::inspect_installation(&PathBuf::from(&p.executable_path)) {
+                    PathBuf::from(insp.bios_dir)
+                } else {
+                    PathBuf::from(&p.executable_path)
+                        .parent()
+                        .unwrap_or(Path::new("."))
+                        .join("bios")
+                }
+            })
+        })
+        .unwrap_or_else(|| {
+            state
+                .db_path
+                .parent()
+                .map(|p| p.join("bios"))
+                .unwrap_or_else(|| PathBuf::from("bios"))
+        });
+
+    let clean_source = pcsx2::sanitize_path(&payload.source_path);
+    let source = PathBuf::from(&clean_source);
+    match pcsx2::import_bios_archive(&bios_dir, &source) {
+        Ok(info) => Ok((StatusCode::CREATED, Json(info))),
+        Err(e) => {
+            if e.contains("duplicada") || e.contains("já estão instaladas") {
+                Err((StatusCode::CONFLICT, e))
+            } else {
+                Err((StatusCode::BAD_REQUEST, e))
+            }
+        }
+    }
+}
+
+async fn pcsx2_select_bios_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<SelectBiosPayload>,
+) -> Result<(StatusCode, String), (StatusCode, String)> {
+    let mut conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let mut profile =
+        pcsx2::get_active_profile(&conn).map_err(|e| (StatusCode::NOT_FOUND, e))?;
+    profile.bios_path = Some(payload.bios_path);
+    pcsx2::save_profile(&mut conn, &profile)
+        .map(|_| (StatusCode::OK, "BIOS selecionada com sucesso.".to_string()))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))
+}
+
+async fn pcsx2_list_releases_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Vec<pcsx2::ManagedRelease>>, (StatusCode, String)> {
+    let managed_dir = state
+        .db_path
+        .parent()
+        .map(|p| p.join("managed_pcsx2"))
+        .unwrap_or_else(|| PathBuf::from("managed_pcsx2"));
+    let force_refresh = query.get("refresh").map(|v| v == "true" || v == "1").unwrap_or(false);
+    if let Some(tag) = query.get("tag") {
+        return pcsx2::find_official_release(&managed_dir, tag).await.map(Json).map_err(|e| (StatusCode::BAD_REQUEST, e));
+    }
+    Ok(Json(pcsx2::list_official_releases_async(&managed_dir, force_refresh).await))
+}
+
+async fn pcsx2_install_release_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<InstallReleasePayload>,
+) -> Result<(StatusCode, Json<pcsx2::Pcsx2Installation>), (StatusCode, String)> {
+    let managed_dir = state
+        .db_path
+        .parent()
+        .map(|p| p.join("managed_pcsx2"))
+        .unwrap_or_else(|| PathBuf::from("managed_pcsx2"));
+    if payload.version.is_empty() || !payload.version.bytes().all(|c| c.is_ascii_alphanumeric() || b".-_".contains(&c)) || payload.version == "." || payload.version == ".." {
+        return Err((StatusCode::BAD_REQUEST, "Versão inválida".into()));
+    }
+    let simulate_fail = payload.simulate_fail.unwrap_or(false);
+
+    let downloaded_bytes: Option<Vec<u8>> = if !simulate_fail {
+        let releases = pcsx2::list_official_releases(&managed_dir);
+        let target_url = payload
+            .download_url
+            .or_else(|| {
+                releases
+                    .iter()
+                    .find(|r| r.version == payload.version || r.version.trim_start_matches('v') == payload.version.trim_start_matches('v'))
+                    .map(|r| r.download_url.clone())
+            });
+
+        if let Some(url) = target_url {
+            if !url.starts_with("https://github.com/PCSX2/pcsx2/releases/download/") {
+                return Err((StatusCode::BAD_REQUEST, "Selecione um pacote oficial do PCSX2 no GitHub.".into()));
+            }
+            let client = reqwest::Client::builder()
+                .user_agent("RomManager/0.5.1")
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .ok();
+            if let Some(c) = client {
+                if let Ok(resp) = c.get(&url).send().await {
+                    if resp.status().is_success() {
+                        resp.bytes().await.ok().map(|b| b.to_vec())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if !simulate_fail && downloaded_bytes.is_none() {
+        return Err((StatusCode::BAD_GATEWAY, "Não foi possível baixar o pacote do PCSX2. Tente atualizar a lista de versões.".into()));
+    }
+
+    match pcsx2::install_or_update_managed_pcsx2(
+        &managed_dir,
+        &payload.version,
+        downloaded_bytes.as_deref(),
+        simulate_fail,
+    ) {
+        Ok(installation) => {
+            if let Ok(mut conn) = rusqlite::Connection::open(&state.db_path) {
+                if let Ok(mut profile) = pcsx2::get_active_profile(&conn) {
+                    profile.executable_path = installation.path.clone();
+                    profile.data_dir = installation.data_dir.clone();
+                    let _ = pcsx2::save_profile(&mut conn, &profile);
+                }
+            }
+            Ok((StatusCode::OK, Json(installation)))
+        }
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e)),
+    }
+}
+
+async fn pcsx2_select_version_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<SelectVersionPayload>,
+) -> Result<(StatusCode, Json<pcsx2::Pcsx2Profile>), (StatusCode, String)> {
+    let mut conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let clean_exe = pcsx2::sanitize_path(&payload.executable_path);
+    let exe_path = PathBuf::from(&clean_exe);
+    if !exe_runner::validate_pcsx2_executable(&exe_path) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("Executável do PCSX2 inválido ou não localizado: '{}'", clean_exe),
+        ));
+    }
+
+    let mut profile = if let Some(ref pid) = payload.profile_id {
+        let profiles = pcsx2::list_profiles(&conn).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        profiles
+            .into_iter()
+            .find(|p| &p.id == pid)
+            .ok_or_else(|| (StatusCode::NOT_FOUND, "Perfil especificado não foi encontrado.".to_string()))?
+    } else {
+        pcsx2::get_active_profile(&conn).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+    };
+
+    profile.executable_path = clean_exe.clone();
+    if let Some(dir) = payload.data_dir {
+        let clean_dir = pcsx2::sanitize_path(&dir);
+        if !clean_dir.is_empty() {
+            profile.data_dir = clean_dir;
+        }
+    } else if let Ok(insp) = pcsx2::inspect_installation(&exe_path) {
+        profile.data_dir = insp.data_dir;
+    }
+    profile.is_active = true;
+
+    pcsx2::save_profile(&mut conn, &profile)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let _ = database::set_config(&conn, "pcsx2_path", &clean_exe);
+    let _ = database::set_config(&conn, "pcsx2_executable_path", &clean_exe);
+
+    let mut logs = state.logs.lock().unwrap();
+    logs.push(format!("Versão ativa do PCSX2 alterada para: {}", clean_exe));
+
+    Ok((StatusCode::OK, Json(profile)))
+}
+
+async fn pcsx2_export_covers_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<ExportCoversPayload>,
+) -> Result<Json<pcsx2::CoversExportResult>, (StatusCode, String)> {
+    let conn = rusqlite::Connection::open(&state.db_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let active_profile = pcsx2::get_active_profile(&conn).ok();
+    let covers_dir = payload
+        .pcsx2_covers_dir
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            active_profile.as_ref().map(|p| {
+                if !p.data_dir.is_empty() {
+                    PathBuf::from(&p.data_dir).join("covers")
+                } else if let Ok(insp) = pcsx2::inspect_installation(&PathBuf::from(&p.executable_path)) {
+                    PathBuf::from(insp.covers_dir)
+                } else {
+                    PathBuf::from(&p.executable_path)
+                        .parent()
+                        .unwrap_or(Path::new("."))
+                        .join("covers")
+                }
+            })
+        })
+        .unwrap_or_else(|| {
+            state
+                .db_path
+                .parent()
+                .map(|p| p.join("pcsx2_covers"))
+                .unwrap_or_else(|| PathBuf::from("pcsx2_covers"))
+        });
+
+    let overwrite = payload.overwrite.unwrap_or(false);
+    pcsx2::export_covers_to_pcsx2(&conn, &covers_dir, overwrite)
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))
 }
 
 #[cfg(test)]

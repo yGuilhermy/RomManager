@@ -3,6 +3,8 @@ tasks/
 scripts/
 docs/
 tests/
+!core/tests/
+!apps/desktop/tests/
 core/target/
 apps/desktop/src-tauri/target/
 dist/

@@ -118,7 +118,22 @@ pub fn initialize_db(db_path: &Path) -> Result<Connection> {
             updated_at TEXT NOT NULL,
             finished_at TEXT
         );
-        CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);",
+        CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+
+        CREATE TABLE IF NOT EXISTS pcsx2_profiles (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            executable_path TEXT NOT NULL,
+            data_dir TEXT NOT NULL,
+            bios_path TEXT,
+            renderer TEXT NOT NULL DEFAULT 'Vulkan',
+            aspect_ratio TEXT NOT NULL DEFAULT '16:9',
+            fullscreen INTEGER NOT NULL DEFAULT 0,
+            is_active INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_pcsx2_profiles_active ON pcsx2_profiles(is_active);",
     )?;
 
     let _ = conn.execute(
@@ -127,6 +142,7 @@ pub fn initialize_db(db_path: &Path) -> Result<Connection> {
     );
 
     seed_default_configs(&conn)?;
+    seed_default_pcsx2_profile(&conn)?;
     let has_path_key: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('games') WHERE name='path_key')",
         [],
@@ -176,6 +192,8 @@ fn seed_default_configs(conn: &Connection) -> Result<()> {
         ("auto_download_covers", "true"),
         ("dark_mode", "true"),
         ("max_concurrent_downloads", "2"),
+        ("pcsx2_data_dir", ""),
+        ("pcsx2_bios_dir", ""),
     ];
 
     for (k, v) in defaults.iter() {
@@ -186,6 +204,25 @@ fn seed_default_configs(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    Ok(())
+}
+
+fn seed_default_pcsx2_profile(conn: &Connection) -> Result<()> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pcsx2_profiles",
+        [],
+        |r| r.get(0),
+    )?;
+    if count == 0 {
+        let now = Utc::now().to_rfc3339();
+        let pcsx2_path = get_config(conn, "pcsx2_path")
+            .unwrap_or_else(|| "C:\\Program Files\\PCSX2\\pcsx2-qt.exe".to_string());
+        conn.execute(
+            "INSERT INTO pcsx2_profiles (id, name, executable_path, data_dir, bios_path, renderer, aspect_ratio, fullscreen, is_active, created_at, updated_at)
+             VALUES ('default', 'Perfil Padrão', ?1, '', NULL, 'Vulkan', '16:9', 0, 1, ?2, ?2)",
+            params![pcsx2_path, now],
+        )?;
+    }
     Ok(())
 }
 

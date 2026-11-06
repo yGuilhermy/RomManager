@@ -10,7 +10,7 @@ export async function apiFetch(path: string, options?: RequestInit): Promise<Res
     const attempts = method === "GET" ? 3 : 1;
     for (let attempt = 0; attempt < attempts; attempt++) {
         try {
-            const timeout = AbortSignal.timeout(path.includes("translations") ? 90000 : 30000);
+            const timeout = AbortSignal.timeout(path === "/api/pcsx2/install" ? 300000 : path.includes("translations") ? 90000 : 30000);
             const signal = options?.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
             const response = await fetch(url, { ...options, signal });
             if (!response.ok) {
@@ -19,6 +19,7 @@ export async function apiFetch(path: string, options?: RequestInit): Promise<Res
                 try { const data = JSON.parse(body); message = data.error || data.message || message; } catch {}
                 throw new ApiError(response.status, message);
             }
+            if (method !== "GET" && (path.includes("/api/pcsx2/") || path.includes("/api/config"))) invalidatePcsx2Cache();
             return response;
         } catch (error) {
             if (options?.signal?.aborted) throw error;
@@ -41,4 +42,16 @@ export async function apiJson<T = unknown>(path: string, options?: RequestInit):
         throw new Error("Resposta inválida do catálogo");
     }
     return data as T;
+}
+
+const pcsx2Reads = new Map<string, Promise<unknown>>();
+export function invalidatePcsx2Cache() { pcsx2Reads.clear(); }
+export function cachedPcsx2Json<T>(path: string): Promise<T> {
+    if (path.includes("refresh=true")) invalidatePcsx2Cache();
+    let request = pcsx2Reads.get(path);
+    if (!request) {
+        request = apiJson<T>(path).catch(error => { if (pcsx2Reads.get(path) === request) pcsx2Reads.delete(path); throw error; });
+        pcsx2Reads.set(path, request);
+    }
+    return request as Promise<T>;
 }

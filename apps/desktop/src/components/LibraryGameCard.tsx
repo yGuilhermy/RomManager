@@ -16,7 +16,7 @@ export function LibraryGameCard({game,onOpen,onLaunch,onDelete,busy=false}:Props
             <h3><button type="button" className="card-open" onClick={onOpen}>{game.title}</button></h3>
             <div className="card-badges-row">
                 {isMissing && <span className="card-badge-chip card-badge-danger" title="Arquivo não encontrado na pasta">Ausente</span>}
-                {discLabel && <span className="card-badge-chip card-badge-source">{discLabel}</span>}
+                {discLabel && <span className="card-badge-chip card-badge-multidisc">{discLabel}</span>}
                 <span className="card-badge-chip card-badge-format">{game.format.toUpperCase()}</span>
                 {game.region && <span className="card-badge-chip card-badge-region">{game.region}</span>}
             </div>

@@ -2,13 +2,16 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import "./App.css";
 import { apiFetch, apiJson } from "./lib/api";
 import { DeleteGameDialog } from "./components/DeleteGameDialog";
-import type { InstalledGame, FavoriteItem, HistoryItem, ValidationResult, CoverJob, JobItem, IntegrityResult } from "./types";
+import type { InstalledGame, FavoriteItem, HistoryItem, ValidationResult, CoverJob, JobItem, IntegrityResult, Pcsx2Installation, Pcsx2Profile } from "./types";
+import { formatPcsx2Version } from "./types";
 import { formatBytes } from "./lib/format";
 import { CoverImage } from "./components/CoverImage";
 import { LibraryGameCard } from "./components/LibraryGameCard";
 import { SettingsPage } from "./components/SettingsPage";
 import { ProfilePage } from "./components/ProfilePage";
 import { ActivityPage } from "./components/ActivityPage";
+import { EmulatorPage } from "./components/EmulatorPage";
+import { BiosPage } from "./components/BiosPage";
 import packageInfo from "../package.json";
 import logoUrl from "./assets/logo.png";
 import { ToastContainer, showToast } from "./components/Toast";
@@ -72,26 +75,26 @@ function renderCompatBadge(status: string) {
     const s = status.toLowerCase();
     if (s.includes("perfect") || s.includes("playable")) {
         return (
-            <span style={{ background: "rgba(16, 185, 129, 0.15)", color: "#10b981", border: "1px solid rgba(16, 185, 129, 0.3)", padding: "0.25rem 0.6rem", borderRadius: "4px", fontWeight: "600", fontSize: "0.85rem" }}>
+            <span className="compat-badge-pill playable">
                 ✓ {status} (Jogável Oficial)
             </span>
         );
     }
     if (s.includes("ingame")) {
         return (
-            <span style={{ background: "rgba(245, 158, 11, 0.15)", color: "#f59e0b", border: "1px solid rgba(245, 158, 11, 0.3)", padding: "0.25rem 0.6rem", borderRadius: "4px", fontWeight: "600", fontSize: "0.85rem" }}>
+            <span className="compat-badge-pill ingame">
                 ⚠ {status} (Entra no jogo)
             </span>
         );
     }
     return (
-        <span style={{ background: "rgba(239, 68, 68, 0.15)", color: "#ef4444", border: "1px solid rgba(239, 68, 68, 0.3)", padding: "0.25rem 0.6rem", borderRadius: "4px", fontWeight: "600", fontSize: "0.85rem" }}>
+        <span className="compat-badge-pill unplayable">
             ✕ {status}
         </span>
     );
 }
 
-type Tab = "library" | "catalog" | "search" | "downloads" | "activity" | "settings" | "profile" | "game-page";
+type Tab = "library" | "emulator" | "bios" | "catalog" | "search" | "downloads" | "activity" | "settings" | "profile" | "game-page";
 
 const PER_PAGE_OPTIONS = [12, 24, 48, 96];
 
@@ -122,6 +125,31 @@ function renderNavIcon(id: Tab) {
                     <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
                     <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
                     <line x1="12" y1="22.08" x2="12" y2="12" />
+                </svg>
+            );
+        case "emulator":
+            return (
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="2" y="6" width="20" height="12" rx="2" />
+                    <line x1="6" y1="12" x2="10" y2="12" />
+                    <line x1="8" y1="10" x2="8" y2="14" />
+                    <line x1="15" y1="11" x2="15.01" y2="11" />
+                    <line x1="18" y1="13" x2="18.01" y2="13" />
+                </svg>
+            );
+        case "bios":
+            return (
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="4" y="4" width="16" height="16" rx="2" />
+                    <rect x="9" y="9" width="6" height="6" />
+                    <line x1="9" y1="1" x2="9" y2="4" />
+                    <line x1="15" y1="1" x2="15" y2="4" />
+                    <line x1="9" y1="20" x2="9" y2="23" />
+                    <line x1="15" y1="20" x2="15" y2="23" />
+                    <line x1="20" y1="9" x2="23" y2="9" />
+                    <line x1="20" y1="14" x2="23" y2="14" />
+                    <line x1="1" y1="9" x2="4" y2="9" />
+                    <line x1="1" y1="14" x2="4" y2="14" />
                 </svg>
             );
         case "catalog":
@@ -257,6 +285,8 @@ export default function App() {
 
     const [favorites, setFavorites] = useState<FavoriteItem[]>([]);
     const [history, setHistory] = useState<HistoryItem[]>([]);
+    const [pcsx2Installations, setPcsx2Installations] = useState<Pcsx2Installation[]>([]);
+    const [pcsx2Profiles, setPcsx2Profiles] = useState<Pcsx2Profile[]>([]);
 
     const [selectedGame, setSelectedGame] = useState<{
         id: string;
@@ -497,6 +527,53 @@ export default function App() {
         }
     }, [reportLoad]);
 
+    const fetchPcsx2Data = useCallback(async () => {
+        try {
+            const [insts, profs] = await Promise.all([
+                apiJson<Pcsx2Installation[]>("/api/pcsx2/detect").catch(() => []),
+                apiJson<Pcsx2Profile[]>("/api/pcsx2/profiles").catch(() => []),
+            ]);
+            setPcsx2Installations(insts);
+            setPcsx2Profiles(profs);
+        } catch {
+        }
+    }, []);
+
+    const handleSwitchPcsx2Version = async (path: string) => {
+        try {
+            const matchingInst = pcsx2Installations.find(i => i.path.toLowerCase() === path.toLowerCase());
+            const res = await apiFetch("/api/pcsx2/version/select", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ executable_path: path, data_dir: matchingInst?.data_dir })
+            });
+            if (res.ok) {
+                showToast("Versão do PCSX2 alterada!", "success");
+                void fetchPcsx2Data();
+                void fetchConfigs();
+            } else {
+                showToast("Falha ao selecionar versão do PCSX2.", "error");
+            }
+        } catch {
+            showToast("Erro ao trocar versão do PCSX2.", "error");
+        }
+    };
+
+    const handleSwitchPcsx2Profile = async (profileId: string) => {
+        try {
+            const res = await apiFetch(`/api/pcsx2/profiles/${profileId}/activate`, { method: "POST" });
+            if (res.ok) {
+                showToast("Perfil do PCSX2 ativado!", "success");
+                void fetchPcsx2Data();
+                void fetchConfigs();
+            } else {
+                showToast("Falha ao ativar perfil.", "error");
+            }
+        } catch {
+            showToast("Erro ao trocar perfil do PCSX2.", "error");
+        }
+    };
+
     useEffect(() => {
         fetchInstalledGames();
         fetchDownloads();
@@ -505,13 +582,14 @@ export default function App() {
         fetchFavorites();
         fetchHistory();
         fetchJobs();
+        fetchPcsx2Data();
 
         const timer = setInterval(() => {
             fetchDownloads();
             fetchJobs();
         }, 3000);
         return () => clearInterval(timer);
-    }, [fetchInstalledGames, fetchDownloads, fetchConfigs, fetchLogs, fetchFavorites, fetchHistory, fetchJobs]);
+    }, [fetchInstalledGames, fetchDownloads, fetchConfigs, fetchLogs, fetchFavorites, fetchHistory, fetchJobs, fetchPcsx2Data]);
 
     useEffect(() => {
         const controller = new AbortController();
@@ -532,9 +610,12 @@ export default function App() {
     }, [configs.roms_directory, configs.pcsx2_executable_path, configs.covers_directory]);
 
     useEffect(() => {
-        if (activeTab === "library") void fetchInstalledGames();
+        if (activeTab === "library" || activeTab === "emulator") {
+            void fetchInstalledGames();
+            void fetchPcsx2Data();
+        }
         if (activeTab === "settings") void fetchLogs();
-    }, [activeTab, fetchInstalledGames, fetchLogs]);
+    }, [activeTab, fetchInstalledGames, fetchPcsx2Data, fetchLogs]);
 
     useEffect(() => () => { catalogAbort.current?.abort(); searchAbort.current?.abort(); }, []);
 
@@ -1200,7 +1281,9 @@ export default function App() {
                 <div className="section-label">EMULADOR · PCSX2</div>
                 <nav className="nav nav-group" aria-label="Navegação Emulador PCSX2">
                     {([
-                        { id: "library" as Tab, label: "Biblioteca" }
+                        { id: "library" as Tab, label: "Biblioteca" },
+                        { id: "emulator" as Tab, label: "Instalação e Perfis" },
+                        { id: "bios" as Tab, label: "BIOS" }
                     ] as const).map(item => (
                         <button
                             key={item.id}
@@ -1269,6 +1352,8 @@ export default function App() {
                                 {activeDownloadsCount} downloads ativos
                             </div>
                         )}
+                        {activeTab === "emulator" && <div className="result-count">Gestão do Emulador</div>}
+                        {activeTab === "bios" && <div className="result-count">Gestão de BIOS</div>}
                         {activeTab === "activity" && <div className="result-count">Central de Atividade</div>}
                         {activeTab === "settings" && <div className="result-count">Configurações</div>}
                         {activeTab === "profile" && <div className="result-count">Perfil</div>}
@@ -1333,7 +1418,6 @@ export default function App() {
                                     <div className="card-badges-row">
                                         <span className="card-badge-chip card-badge-format">{item.format || (item.filename?.toLowerCase().endsWith(".7z") ? "7Z" : item.filename?.toLowerCase().endsWith(".iso") ? "ISO" : "CHD")}</span>
                                         <span className="card-badge-chip card-badge-region">{item.region || "Livre"}</span>
-                                        <span className="card-badge-chip card-badge-source">{item.source || (item.part?.includes("CDRomance") ? "CDRomance" : "Catálogo")}</span>
                                     </div>
                                     <p className="mod-author">{item.size>0 ? formatBytes(item.size) : "Tamanho sob consulta"} · Coleção: {item.part}</p>
                                     <div className="card-action-bar">
@@ -1374,6 +1458,57 @@ export default function App() {
                                 </button>
                             </div>
                         )}
+                        <div className="library-emulator-bar">
+                            <div className="library-emulator-selectors">
+                                <div className="library-emulator-field">
+                                    <span className="library-emulator-label">
+                                        Versão do Emulador:
+                                    </span>
+                                    <select
+                                        value={pcsx2Profiles.find(p => p.is_active)?.executable_path || configs.pcsx2_executable_path || ""}
+                                        onChange={e => void handleSwitchPcsx2Version(e.target.value)}
+                                        className="library-emulator-select"
+                                    >
+                                        {pcsx2Installations.map(inst => (
+                                            <option key={inst.path} value={inst.path}>
+                                                {formatPcsx2Version(inst.version)} ({inst.is_managed ? "Gerenciado" : inst.is_portable ? "Portátil" : "Sistema"})
+                                            </option>
+                                        ))}
+                                        {(pcsx2Profiles.find(p => p.is_active)?.executable_path || configs.pcsx2_executable_path) &&
+                                         !pcsx2Installations.some(i => i.path.toLowerCase() === (pcsx2Profiles.find(p => p.is_active)?.executable_path || configs.pcsx2_executable_path).toLowerCase()) && (
+                                            <option value={pcsx2Profiles.find(p => p.is_active)?.executable_path || configs.pcsx2_executable_path}>
+                                                Personalizado ({pcsx2Profiles.find(p => p.is_active)?.executable_path || configs.pcsx2_executable_path})
+                                            </option>
+                                        )}
+                                    </select>
+                                </div>
+                                {pcsx2Profiles.length > 0 && (
+                                    <div className="library-emulator-field">
+                                        <span className="library-emulator-label">
+                                            Perfil Ativo:
+                                        </span>
+                                        <select
+                                            value={pcsx2Profiles.find(p => p.is_active)?.id || ""}
+                                            onChange={e => void handleSwitchPcsx2Profile(e.target.value)}
+                                            className="library-emulator-select"
+                                        >
+                                            {pcsx2Profiles.map(p => (
+                                                <option key={p.id} value={p.id}>
+                                                    {p.name} ({p.renderer}, {p.aspect_ratio})
+                                                </option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                )}
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setActiveTab("emulator")}
+                                className="library-emulator-manage-btn"
+                            >
+                                Gerenciar Versões e Perfis →
+                            </button>
+                        </div>
                         <div className="library-controls-group library-toolbar-v2"><label className="library-search-label"><span className="visually-hidden">Buscar na biblioteca</span><input className="compact-input" type="search" placeholder="Buscar na biblioteca…" value={librarySearch} onChange={event=>setLibrarySearch(event.target.value)}/></label><div className="view-mode-buttons"><button type="button" className={`view-mode-btn${viewMode==="grid"?" active":""}`} aria-pressed={viewMode==="grid"} onClick={()=>setViewMode("grid")}>Grade</button><button type="button" className={`view-mode-btn${viewMode==="list"?" active":""}`} aria-pressed={viewMode==="list"} onClick={()=>setViewMode("list")}>Lista</button></div><button type="button" className="button-secondary" disabled={isScanning || !!coverJob?.running} onClick={()=>void scanGames()}>{isScanning?"Sincronizando…":"Sincronizar pasta"}</button><button type="button" className="button-secondary" disabled={isScanning || !!coverJob?.running || !installedGames.length} onClick={()=>void regenerateCovers()}>{coverJob?.running?"Regenerando…":"Regenerar capas"}</button></div>
                         {coverJob?.running && <div className="cover-job" role="status"><div><strong>Regenerando capas: {coverJob.processed} de {coverJob.total}</strong><span>{coverJob.current || "Preparando…"}</span></div><progress aria-label="Progresso da regeneração de capas" max={coverJob.total || 1} value={coverJob.processed}/></div>}
                         <div className="library-filters-bar"><label className="filter-item">Ordenar por<select value={librarySort} onChange={event=>setLibrarySort(event.target.value)}><option value="name_asc">Nome (A–Z)</option><option value="name_desc">Nome (Z–A)</option><option value="size_desc">Maior tamanho</option><option value="size_asc">Menor tamanho</option></select></label><label className="filter-item">Status<select value={libraryFilterStatus} onChange={event=>setLibraryFilterStatus(event.target.value as "all"|"available"|"missing")}><option value="all">Todos</option><option value="available">Disponíveis</option><option value="missing">Ausentes</option></select></label><label className="filter-item">Região<select value={libraryFilterRegion} onChange={event=>setLibraryFilterRegion(event.target.value)}><option value="all">Todas</option>{Array.from(new Set(installedGames.map(game=>game.region).filter((value):value is string=>!!value))).sort().map(region=><option key={region}>{region}</option>)}</select></label><label className="filter-item">Formato<select value={libraryFilterFormat} onChange={event=>setLibraryFilterFormat(event.target.value)}><option value="all">Todos</option>{Array.from(new Set(installedGames.map(game=>game.format.toLowerCase()))).sort().map(format=><option value={format} key={format}>{format.toUpperCase()}</option>)}</select></label>{(librarySearch || libraryFilterRegion!=="all" || libraryFilterFormat!=="all" || libraryFilterStatus!=="all") && <button type="button" className="button-quiet" onClick={()=>{setLibrarySearch("");setLibraryFilterRegion("all");setLibraryFilterFormat("all");setLibraryFilterStatus("all");}}>Limpar filtros</button>}</div>
@@ -1428,7 +1563,6 @@ export default function App() {
                                     <div className="card-badges-row">
                                         <span className="card-badge-chip card-badge-format">{game.format || (game.filename?.toLowerCase().endsWith(".7z") ? "7Z" : game.filename?.toLowerCase().endsWith(".iso") ? "ISO" : "CHD")}</span>
                                         <span className="card-badge-chip card-badge-region">{game.region || "Livre"}</span>
-                                        <span className="card-badge-chip card-badge-source">{game.source || (game.part?.includes("CDRomance") ? "CDRomance" : "Catálogo")}</span>
                                     </div>
                                     <p className="mod-author">{game.size>0 ? formatBytes(game.size) : "Tamanho sob consulta"}</p>
                                     <div className="card-action-bar">
@@ -1489,6 +1623,8 @@ export default function App() {
                         onOpenGame={openInstalledGame} onOpenFavorite={favorite=>openGameDetail({...favorite,filename:"",cover_url:favorite.cover_url || "",size:favorite.size || 0,region:favorite.region || "",part:""})}
                         onRemoveFavorite={async favorite=>{await apiFetch(`/api/favorites/${encodeURIComponent(favorite.id)}`,{method:"DELETE"});await fetchFavorites();}}
                         onRefresh={async()=>{await Promise.all([fetchInstalledGames(),fetchFavorites(),fetchHistory()]);}} />}
+                    {activeTab === "emulator" && <EmulatorPage onShowToast={showToast} />}
+                    {activeTab === "bios" && <BiosPage onShowToast={showToast} />}
 
                     {activeTab === "game-page" && selectedGame && (
                         <div className="mod-page-view">
@@ -1748,16 +1884,42 @@ export default function App() {
                                                         );
                                                     }
                                                     return (
-                                                        <button
-                                                            className="sync-btn"
-                                                            style={{ width: "100%", padding: "0.75rem" }}
-                                                            onClick={() => launchGame(selectedGame.installedPath!)}
-                                                        >
-                                                            <svg viewBox="0 0 24 24" fill="currentColor" stroke="none">
-                                                                <polygon points="6 4 20 12 6 20 6 4" />
-                                                            </svg>
-                                                            <span>Iniciar no PCSX2</span>
-                                                        </button>
+                                                        <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", width: "100%" }}>
+                                                            {pcsx2Installations.length > 0 && (
+                                                                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                                                                    <span style={{ fontSize: "0.75rem", color: "#9ca3af", whiteSpace: "nowrap" }}>Versão:</span>
+                                                                    <select
+                                                                        value={pcsx2Profiles.find(p => p.is_active)?.executable_path || configs.pcsx2_executable_path || ""}
+                                                                        onChange={e => void handleSwitchPcsx2Version(e.target.value)}
+                                                                        style={{
+                                                                            width: "100%",
+                                                                            padding: "0.3rem 0.5rem",
+                                                                            borderRadius: "4px",
+                                                                            background: "#0f172a",
+                                                                            border: "1px solid rgba(255, 255, 255, 0.15)",
+                                                                            color: "#f3f4f6",
+                                                                            fontSize: "0.8rem"
+                                                                        }}
+                                                                    >
+                                                                        {pcsx2Installations.map(inst => (
+                                                                            <option key={inst.path} value={inst.path}>
+                                                                                {formatPcsx2Version(inst.version)} ({inst.is_managed ? "Gerenciado" : inst.is_portable ? "Portátil" : "Sistema"})
+                                                                            </option>
+                                                                        ))}
+                                                                    </select>
+                                                                </div>
+                                                            )}
+                                                            <button
+                                                                className="sync-btn"
+                                                                style={{ width: "100%", padding: "0.75rem" }}
+                                                                onClick={() => launchGame(selectedGame.installedPath!)}
+                                                            >
+                                                                <svg viewBox="0 0 24 24" fill="currentColor" stroke="none">
+                                                                    <polygon points="6 4 20 12 6 20 6 4" />
+                                                                </svg>
+                                                                <span>Iniciar no PCSX2</span>
+                                                            </button>
+                                                        </div>
                                                     );
                                                 }
                                                 return (

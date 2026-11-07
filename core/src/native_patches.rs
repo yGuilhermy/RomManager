@@ -1,3 +1,4 @@
+use crate::cache::{FileStamp, LOCAL_GROUPS, ZIP_INDEX, ZIP_TEXT};
 use crate::{game_resources as gr, memory_cards as mc, pcsx2};
 use rusqlite::Connection;
 use serde::Serialize;
@@ -6,8 +7,68 @@ use std::{
     fs,
     io::Read,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 type R<T> = Result<T, String>;
+
+fn zip_location(installation: &pcsx2::Pcsx2Installation) -> R<PathBuf> {
+    Ok(Path::new(&installation.path)
+        .parent()
+        .ok_or("Pasta do PCSX2 inválida")?
+        .join("resources/patches.zip"))
+}
+fn zip_names(zip_path: &Path) -> R<Option<(Arc<Vec<String>>, FileStamp)>> {
+    if !zip_path.is_file() {
+        return Ok(None);
+    }
+    mc::plain(zip_path)?;
+    let stamp = FileStamp::of(zip_path).ok_or("Pacote de patches ilegível.")?;
+    if stamp.size > 64 * 1024 * 1024 {
+        return Err("Pacote de patches acima do limite.".into());
+    }
+    let key = zip_path.to_path_buf();
+    if let Some(names) = ZIP_INDEX.get(&key, &stamp) {
+        return Ok(Some((names, stamp)));
+    }
+    let zip = zip::ZipArchive::new(fs::File::open(zip_path).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    if zip.len() > 100000 {
+        return Err("Pacote de patches com entradas demais.".into());
+    }
+    let names = Arc::new(zip.file_names().map(str::to_string).collect::<Vec<_>>());
+    ZIP_INDEX.put(key, stamp.clone(), names.clone());
+    Ok(Some((names, stamp)))
+}
+fn zip_text(zip_path: &Path, stamp: &FileStamp, entry: &str) -> R<Arc<String>> {
+    let key = (zip_path.to_path_buf(), entry.to_string());
+    if let Some(text) = ZIP_TEXT.get(&key, stamp) {
+        return Ok(text);
+    }
+    let mut zip = zip::ZipArchive::new(fs::File::open(zip_path).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    let mut file = zip.by_name(entry).map_err(|e| e.to_string())?;
+    if file.size() > 2 * 1024 * 1024 {
+        return Err("Patch nativo acima do limite.".into());
+    }
+    let mut text = String::new();
+    file.by_ref()
+        .take(2 * 1024 * 1024 + 1)
+        .read_to_string(&mut text)
+        .map_err(|e| e.to_string())?;
+    if text.len() > 2 * 1024 * 1024 {
+        return Err("Patch nativo acima do limite.".into());
+    }
+    let text = Arc::new(text);
+    ZIP_TEXT.put(key, stamp.clone(), text.clone());
+    Ok(text)
+}
+pub fn warm_index(conn: &Connection) {
+    if let Ok(installation) = pcsx2::current_installation(conn) {
+        if let Ok(path) = zip_location(&installation) {
+            let _ = zip_names(&path);
+        }
+    }
+}
 
 #[derive(Clone, Serialize)]
 pub struct Group {
@@ -175,28 +236,11 @@ pub fn catalogue(
     cheats_enabled: bool,
 ) -> R<Catalogue> {
     let installation = pcsx2::current_installation(conn)?;
-    let zip_path = Path::new(&installation.path)
-        .parent()
-        .ok_or("Pasta do PCSX2 inválida")?
-        .join("resources/patches.zip");
-    let mut zip = if zip_path.is_file() {
-        mc::plain(&zip_path)?;
-        if fs::metadata(&zip_path).map_err(|e| e.to_string())?.len() > 64 * 1024 * 1024 {
-            return Err("Pacote de patches acima do limite.".into());
-        }
-        Some(
-            zip::ZipArchive::new(fs::File::open(&zip_path).map_err(|e| e.to_string())?)
-                .map_err(|e| e.to_string())?,
-        )
-    } else {
-        None
-    };
+    let zip_path = zip_location(&installation)?;
+    let zip_index = zip_names(&zip_path)?;
     let mut crcs = BTreeSet::new();
-    if let Some(zip) = &zip {
-        if zip.len() > 100000 {
-            return Err("Pacote de patches com entradas demais.".into());
-        }
-        for name in zip.file_names() {
+    if let Some((names, _)) = &zip_index {
+        for name in names.iter() {
             if !name.contains(['/', '\\']) {
                 if let Some(crc) = file_crc(name, serial) {
                     crcs.insert(crc);
@@ -211,7 +255,6 @@ pub fn catalogue(
             crcs.insert(crc);
         }
     }
-    // A single revision is useful without claiming that it was read from the ROM.
     let crc = if !requested.is_empty() {
         if !gr::crc_valid(requested) {
             return Err("CRC inválido.".into());
@@ -244,13 +287,27 @@ pub fn catalogue(
             {
                 continue;
             }
-            let bytes = mc::read_bounded(&path)?;
-            if bytes.len() > 2 * 1024 * 1024 {
-                return Err("PNACH acima do limite de 2 MB.".into());
-            }
-            let text =
-                String::from_utf8(bytes).map_err(|_| "PNACH não está em UTF-8.".to_string())?;
-            let groups = parse(&text, kind, &path.to_string_lossy(), false);
+            let local_key = (path.clone(), kind.to_string());
+            let local_stamp = FileStamp::of(&path);
+            let cached = local_stamp
+                .as_ref()
+                .and_then(|stamp| LOCAL_GROUPS.get(&local_key, stamp));
+            let groups = match cached {
+                Some(groups) => groups,
+                None => {
+                    let bytes = mc::read_bounded(&path)?;
+                    if bytes.len() > 2 * 1024 * 1024 {
+                        return Err("PNACH acima do limite de 2 MB.".into());
+                    }
+                    let text = String::from_utf8(bytes)
+                        .map_err(|_| "PNACH não está em UTF-8.".to_string())?;
+                    let groups = parse(&text, kind, &path.to_string_lossy(), false);
+                    if let Some(stamp) = local_stamp {
+                        LOCAL_GROUPS.put(local_key, stamp, groups.clone());
+                    }
+                    groups
+                }
+            };
             suppressed |= kind == "patches" && groups.iter().any(|g| g.automatic);
             result.groups.extend(groups);
         }
@@ -259,27 +316,17 @@ pub fn catalogue(
         result.warnings.push("Um patch local sem grupos impede o PCSX2 de carregar os patches do pacote nativo para esta revisão.".into());
     }
     if !suppressed {
-        if let Some(zip) = zip.as_mut() {
+        if let Some((names, stamp)) = &zip_index {
             let entry = [format!("{serial}_{crc}.pnach"), format!("{crc}.pnach")]
                 .into_iter()
                 .find_map(|wanted| {
-                    zip.file_names()
+                    names
+                        .iter()
                         .find(|name| name.eq_ignore_ascii_case(&wanted))
-                        .map(str::to_string)
+                        .cloned()
                 });
             if let Some(entry) = entry {
-                let mut file = zip.by_name(&entry).map_err(|e| e.to_string())?;
-                if file.size() > 2 * 1024 * 1024 {
-                    return Err("Patch nativo acima do limite.".into());
-                }
-                let mut text = String::new();
-                file.by_ref()
-                    .take(2 * 1024 * 1024 + 1)
-                    .read_to_string(&mut text)
-                    .map_err(|e| e.to_string())?;
-                if text.len() > 2 * 1024 * 1024 {
-                    return Err("Patch nativo acima do limite.".into());
-                }
+                let text = zip_text(&zip_path, stamp, &entry)?;
                 result.groups.extend(parse(
                     &text,
                     "patches",

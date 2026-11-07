@@ -215,6 +215,14 @@ pub fn count_covers_in_directory(path: &Path) -> usize {
 }
 
 pub fn extract_serial_from_file(path: &Path) -> Option<String> {
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        if ext.eq_ignore_ascii_case("chd") {
+            if let Some(s) = crate::chd::extract_chd_serial(path) {
+                return Some(s);
+            }
+        }
+    }
+
     if let Ok(mut f) = File::open(path) {
         let mut buf = vec![0u8; 8 * 1024 * 1024];
         if let Ok(bytes_read) = f.read(&mut buf) {
@@ -702,24 +710,36 @@ pub fn list_installed_games(conn: &Connection) -> Result<Vec<InstalledGame>, Str
         .query_map([], |row| {
             let file_path: String = row.get(3)?;
             let is_missing = !Path::new(&file_path).exists();
+            let mut serial: Option<String> = row.get(8)?;
+            let format: String = row.get(5)?;
+            if serial.as_ref().map(|s| s.trim().is_empty()).unwrap_or(true) && format.eq_ignore_ascii_case("chd") && !is_missing {
+                if let Some(s) = crate::chd::extract_chd_serial(Path::new(&file_path)) {
+                    serial = Some(s);
+                }
+            }
             Ok(InstalledGame {
                 id: row.get(0)?,
                 title: row.get(1)?,
                 filename: row.get(2)?,
                 file_path,
                 file_size: row.get::<_, i64>(4)? as u64,
-                format: row.get(5)?,
+                format,
                 cover_url: row.get(6)?,
                 region: row.get(7)?,
-                serial: row.get(8)?,
+                serial,
                 date_added: row.get(9)?,
                 is_missing,
             })
         })
         .map_err(|e| e.to_string())?;
 
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())
+    let games = rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+    for g in &games {
+        if let Some(s) = &g.serial {
+            let _ = conn.execute("UPDATE games SET serial = ?1 WHERE id = ?2 AND (serial IS NULL OR serial = '')", params![s, g.id]);
+        }
+    }
+    Ok(games)
 }
 
 pub fn verify_game_integrity(conn: &Connection, id: &str) -> Result<IntegrityCheckResult, String> {

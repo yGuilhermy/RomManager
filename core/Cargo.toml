@@ -30,3 +30,5 @@ chrono = { version = "0.4", features = ["serde"] }
 regex = "1.10"
 sha2 = "0.10.9"
 encoding_rs = "0.8.35"
+flate2 = "1.1.9"
+lzma-rust = "0.1.7"

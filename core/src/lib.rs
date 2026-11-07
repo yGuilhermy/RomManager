@@ -1,4 +1,7 @@
+pub mod achievements;
 pub mod api_roms;
+pub mod cache;
+pub mod chd;
 pub mod covers;
 pub mod database;
 pub mod download_manager;
@@ -176,6 +179,9 @@ pub async fn start_api() {
         job_manager: job_mgr,
     });
 
+    let warm_db = state.db_path.clone();
+    tokio::task::spawn_blocking(move || cache::warmup(&warm_db));
+
     let cors = CorsLayer::new()
         .allow_origin([
             HeaderValue::from_static("http://localhost:1420"),
@@ -248,12 +254,21 @@ pub async fn start_api() {
             "/api/pcsx2/resources/game",
             get(game_resource_settings).post(toggle_game_resource),
         )
+        .route("/api/cache/prefetch", post(cache_prefetch_handler))
         .route("/api/pcsx2/bios", get(pcsx2_list_bios_handler))
         .route("/api/pcsx2/bios/import", post(pcsx2_import_bios_handler))
         .route("/api/pcsx2/bios/select", post(pcsx2_select_bios_handler))
         .route(
             "/api/pcsx2/covers/export",
             post(pcsx2_export_covers_handler),
+        )
+        .route("/api/pcsx2/achievements/state", get(achievements_state_handler))
+        .route("/api/pcsx2/achievements/login", post(achievements_login_handler))
+        .route("/api/pcsx2/achievements/logout", post(achievements_logout_handler))
+        .route("/api/pcsx2/achievements/game", get(achievements_game_handler))
+        .route(
+            "/api/pcsx2/achievements/game/sync",
+            post(achievements_game_sync_handler),
         )
         .route("/api/favorites", get(list_favorites).post(add_favorite))
         .route("/api/favorites/:id", delete(delete_favorite))
@@ -453,6 +468,7 @@ struct CoverServeQuery {
 async fn serve_cover(
     Query(q): Query<CoverServeQuery>,
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<axum::response::Response, StatusCode> {
     let covers_dir_str = {
         if let Ok(conn) = rusqlite::Connection::open(&state.db_path) {
@@ -482,8 +498,24 @@ async fn serve_cover(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    if fs::metadata(&p).map_err(|_| StatusCode::NOT_FOUND)?.len() > 32 * 1024 * 1024 {
+    let meta = fs::metadata(&p).map_err(|_| StatusCode::NOT_FOUND)?;
+    if meta.len() > 32 * 1024 * 1024 {
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    let etag = cache::FileStamp::of(&p).map(|stamp| stamp.tag());
+    if let Some(tag) = &etag {
+        let unchanged = headers
+            .get("if-none-match")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value == tag);
+        if unchanged {
+            return axum::response::Response::builder()
+                .status(StatusCode::NOT_MODIFIED)
+                .header("ETag", tag.as_str())
+                .header("Cache-Control", "public, max-age=86400")
+                .body(axum::body::Body::empty())
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
+        }
     }
     let bytes = fs::read(&p).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let content_type = match p.extension().and_then(|e| e.to_str()).unwrap_or("") {
@@ -492,11 +524,45 @@ async fn serve_cover(
         _ => "image/jpeg",
     };
 
-    axum::response::Response::builder()
+    let mut builder = axum::response::Response::builder()
         .header("Content-Type", content_type)
-        .header("Cache-Control", "public, max-age=86400")
+        .header("Cache-Control", "public, max-age=86400");
+    if let Some(tag) = &etag {
+        builder = builder.header("ETag", tag.as_str());
+    }
+    builder
         .body(axum::body::Body::from(bytes))
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+#[derive(Deserialize)]
+struct PrefetchPayload {
+    game_id: String,
+    #[serde(default)]
+    crc: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    serial: Option<String>,
+}
+
+async fn cache_prefetch_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<PrefetchPayload>,
+) -> StatusCode {
+    let db = state.db_path.clone();
+    let game_id = payload.game_id.clone();
+    let crc = payload.crc.clone();
+    tokio::task::spawn_blocking(move || cache::prefetch_game(&db, &game_id, &crc));
+    if !payload.title.trim().is_empty() {
+        let db = state.db_path.clone();
+        tokio::spawn(async move {
+            let _ =
+                game_metadata::get_metadata_for_game(&db, &payload.title, payload.serial.as_deref())
+                    .await;
+        });
+    }
+    StatusCode::ACCEPTED
 }
 
 async fn get_catalog(Query(q): Query<CatalogQuery>) -> Json<api_roms::CatalogResponse> {
@@ -1548,3 +1614,72 @@ async fn toggle_game_resource(
     .map(Json)
     .map_err(|e| (StatusCode::CONFLICT, e))
 }
+
+async fn achievements_state_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<achievements::AchievementsState>, (StatusCode, String)> {
+    tokio::task::spawn_blocking(move || {
+        let conn = rusqlite::Connection::open(&state.db_path).map_err(|e| e.to_string())?;
+        achievements::get_state(&conn, &state.db_path)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map(Json)
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))
+}
+
+async fn achievements_login_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<achievements::LoginPayload>,
+) -> Result<Json<achievements::AchievementsState>, (StatusCode, String)> {
+    let result = achievements::login_account(&state.db_path, payload)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    if let Some(acc) = &result.account {
+        if let Ok(mut logs) = state.logs.lock() {
+            logs.push(format!(
+                "Conta RetroAchievements vinculada em modo consulta: {}",
+                acc.username
+            ));
+        }
+    }
+    Ok(Json(result))
+}
+
+async fn achievements_logout_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<achievements::AchievementsState>, (StatusCode, String)> {
+    let db_path = state.db_path.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+        achievements::logout_account(&conn, &db_path)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    if let Ok(mut logs) = state.logs.lock() {
+        logs.push("Conta RetroAchievements desvinculada e segredo removido do cofre.".into());
+    }
+    Ok(Json(result))
+}
+
+async fn achievements_game_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<achievements::GameProgressQuery>,
+) -> Result<Json<achievements::RaGameProgress>, (StatusCode, String)> {
+    achievements::get_or_sync_game_progress(&state.db_path, &query.game_id, query.refresh)
+        .await
+        .map(Json)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))
+}
+
+async fn achievements_game_sync_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<achievements::SyncGamePayload>,
+) -> Result<Json<achievements::RaGameProgress>, (StatusCode, String)> {
+    achievements::get_or_sync_game_progress(&state.db_path, &payload.game_id, true)
+        .await
+        .map(Json)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))
+}
+

@@ -1,8 +1,6 @@
-//! Bounded PS2 FAT deletion; works on a staged image and preserves its geometry and ECC layout.
 use super::{CardReader, McResult, read_bounded, u16le, u32le};
 use std::{collections::HashSet, fs, path::Path};
 
-// PS2 Hamming parity definition: Ross Ridge, public-domain mymc/ps2mc_ecc.py.
 fn ecc(bytes: &[u8]) -> [u8; 3] {
     static TABLE: std::sync::OnceLock<[u8; 256]> = std::sync::OnceLock::new();
     let table = TABLE.get_or_init(|| {
@@ -77,7 +75,7 @@ impl Ownership<'_> {
         if depth > 64 {
             return Err("Diretórios aninhados além do limite.".into());
         }
-        if length == 0 && !directory {
+        if (length == 0 && !directory) || first == u32::MAX as usize {
             return Ok(());
         }
         let clusters = chain(self.card, first)?;
@@ -90,7 +88,7 @@ impl Ownership<'_> {
             }
         }
         if !directory {
-            if length > clusters.len() * 1024 {
+            if selected && length > clusters.len() * 1024 {
                 return Err("Arquivo excede a própria cadeia FAT.".into());
             }
             return Ok(());
@@ -163,13 +161,6 @@ pub fn delete(path: &Path, save: &str) -> McResult<()> {
         for page in changed {
             let raw_at = page * 512;
             let physical = page * 528;
-            for chunk in 0..4 {
-                let from = physical + chunk * 128;
-                let code = ecc(&original[from..from + 128]);
-                if original[physical + 512 + chunk * 3..physical + 515 + chunk * 3] != code {
-                    return Err("ECC inválido nos metadados. O cartão não foi alterado.".into());
-                }
-            }
             output[physical..physical + 512].copy_from_slice(&card.raw[raw_at..raw_at + 512]);
             for chunk in 0..4 {
                 let code = ecc(&card.raw[raw_at + chunk * 128..raw_at + (chunk + 1) * 128]);

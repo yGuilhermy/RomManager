@@ -19,7 +19,12 @@ test("navigation structure contains PlayStation 2, Emulador and Geral groups in 
         assert.ok(content.includes(item), `Missing PS2 item: ${item}`);
     }
 
-    const emulatorItems = ['{ id: "library" as Tab, label: "Biblioteca" }'];
+    const emulatorItems = [
+        '{ id: "library" as Tab, label: "Biblioteca" }',
+        '{ id: "bios" as Tab, label: "BIOS" }',
+        '{ id: "memory-cards" as Tab, label: "Memory cards" }',
+        '{ id: "achievements" as Tab, label: "Conquistas" }',
+    ];
     for (const item of emulatorItems) {
         assert.ok(content.includes(item), `Missing Emulator item: ${item}`);
     }

@@ -14,9 +14,11 @@ import { BrowsePathButton } from "./components/BrowsePathButton";
 import { GameCompatibilityPanel } from "./components/GameCompatibilityPanel";
 import { MemoryCardsPage } from "./components/MemoryCardsPage";
 import { BiosPage } from "./components/BiosPage";
+import { AchievementsPage } from "./components/AchievementsPage";
 import packageInfo from "../package.json";
 import logoUrl from "./assets/logo.png";
 import { ToastContainer, showToast } from "./components/Toast";
+import { prefetchAppWarmup, prefetchGameBundle } from "./lib/prefetcher";
 
 interface RomCatalogItem {
     id: string;
@@ -73,7 +75,7 @@ interface GameMetadata {
     compatibility: Pcsx2Compat | null;
 }
 
-type Tab = "memory-cards" | "library" | "bios" | "catalog" | "search" | "downloads" | "activity" | "settings" | "profile" | "game-page";
+type Tab = "memory-cards" | "library" | "bios" | "achievements" | "catalog" | "search" | "downloads" | "activity" | "settings" | "profile" | "game-page";
 
 const PER_PAGE_OPTIONS = [12, 24, 48, 96];
 
@@ -162,6 +164,17 @@ function renderNavIcon(id: Tab) {
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
                     <circle cx="12" cy="7" r="4" />
+                </svg>
+            );
+        case "achievements":
+            return (
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6" />
+                    <path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18" />
+                    <path d="M4 22h16" />
+                    <path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22" />
+                    <path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22" />
+                    <path d="M18 2H6v7a6 6 0 0 0 12 0V2Z" />
                 </svg>
             );
         default:
@@ -270,7 +283,7 @@ export default function App() {
         installedId?: string;
         serial?: string | null;
     } | null>(null);
-    const [detailSubTab, setDetailSubTab] = useState<"info" | "compatibility" | ResourceKind>("info");
+    const [detailSubTab, setDetailSubTab] = useState<"info" | "compatibility" | "achievements" | ResourceKind>("info");
     const [metadataRevision,setMetadataRevision]=useState(0);
     const [gameMetadata, setGameMetadata] = useState<GameMetadata | null>(null);
     const [isLoadingMetadata, setIsLoadingMetadata] = useState(false);
@@ -566,6 +579,10 @@ export default function App() {
             .finally(() => { if (!controller.signal.aborted) setIsLoadingMetadata(false); });
         return () => controller.abort();
     }, [selectedGame,metadataRevision]);
+
+    useEffect(() => {
+        if (installedGames.length) prefetchAppWarmup();
+    }, [installedGames.length]);
 
     const isActiveDownload = (status?: string) =>
         ["queued", "pending", "downloading", "extracting", "copying"].includes((status || "").toLowerCase());
@@ -935,6 +952,7 @@ export default function App() {
     };
 
     const openInstalledGame = (game: InstalledGame) => {
+        prefetchGameBundle({ id: game.id, title: game.title, serial: game.serial });
         setIntegrityResult(null);
         setSelectedGame({ id:game.id,title:game.title,url:"",cover_url:game.cover_url || "",size:game.file_size,region:game.region || "Desconhecido",part:game.serial || "",serial:game.serial,format:game.format,isInstalled:true,installedPath:game.file_path,installedId:game.id });
         setPreviousTab(activeTab);setActiveTab("game-page");
@@ -1102,6 +1120,7 @@ export default function App() {
     const openGameDetail = (game: RomCatalogItem) => {
         setIntegrityResult(null);
         const installed = installedGames.find(g => g.filename.toLowerCase() === game.filename.toLowerCase() || g.title.toLowerCase() === game.title.toLowerCase());
+        if (installed) prefetchGameBundle({ id: installed.id, title: installed.title, serial: installed.serial });
         setSelectedGame({
             id: game.id,
             title: game.title,
@@ -1204,6 +1223,7 @@ export default function App() {
                         { id: "library" as Tab, label: "Biblioteca" },
                         { id: "bios" as Tab, label: "BIOS" },
                         { id: "memory-cards" as Tab, label: "Memory cards" },
+                        { id: "achievements" as Tab, label: "Conquistas" },
                     ] as const).map(item => (
                         <button
                             key={item.id}
@@ -1273,6 +1293,8 @@ export default function App() {
                             </div>
                         )}
                         {activeTab === "bios" && <div className="result-count">Gestão de BIOS</div>}
+                        {activeTab === "memory-cards" && <div className="result-count">Memory cards</div>}
+                        {activeTab === "achievements" && <div className="result-count">Conquistas · RetroAchievements</div>}
                         {activeTab === "activity" && <div className="result-count">Central de Atividade</div>}
                         {activeTab === "settings" && <div className="result-count">Configurações</div>}
                         {activeTab === "profile" && <div className="result-count">Perfil</div>}
@@ -1381,7 +1403,7 @@ export default function App() {
                         <div className="library-controls-group library-toolbar-v2"><label className="library-search-label"><span className="visually-hidden">Buscar na biblioteca</span><input className="compact-input" type="search" placeholder="Buscar na biblioteca…" value={librarySearch} onChange={event=>setLibrarySearch(event.target.value)}/></label><div className="view-mode-buttons"><button type="button" className={`view-mode-btn${viewMode==="grid"?" active":""}`} aria-pressed={viewMode==="grid"} onClick={()=>setViewMode("grid")}>Grade</button><button type="button" className={`view-mode-btn${viewMode==="list"?" active":""}`} aria-pressed={viewMode==="list"} onClick={()=>setViewMode("list")}>Lista</button></div><button type="button" className="button-secondary" disabled={isScanning || !!coverJob?.running} onClick={()=>void scanGames()}>{isScanning?"Sincronizando…":"Sincronizar pasta"}</button><button type="button" className="button-secondary" disabled={isScanning || !!coverJob?.running || !installedGames.length} onClick={()=>void regenerateCovers()}>{coverJob?.running?"Regenerando…":"Regenerar capas"}</button></div>
                         {coverJob?.running && <div className="cover-job" role="status"><div><strong>Regenerando capas: {coverJob.processed} de {coverJob.total}</strong><span>{coverJob.current || "Preparando…"}</span></div><progress aria-label="Progresso da regeneração de capas" max={coverJob.total || 1} value={coverJob.processed}/></div>}
                         <div className="library-filters-bar"><label className="filter-item">Ordenar por<select value={librarySort} onChange={event=>setLibrarySort(event.target.value)}><option value="name_asc">Nome (A–Z)</option><option value="name_desc">Nome (Z–A)</option><option value="size_desc">Maior tamanho</option><option value="size_asc">Menor tamanho</option></select></label><label className="filter-item">Status<select value={libraryFilterStatus} onChange={event=>setLibraryFilterStatus(event.target.value as "all"|"available"|"missing")}><option value="all">Todos</option><option value="available">Disponíveis</option><option value="missing">Ausentes</option></select></label><label className="filter-item">Região<select value={libraryFilterRegion} onChange={event=>setLibraryFilterRegion(event.target.value)}><option value="all">Todas</option>{Array.from(new Set(installedGames.map(game=>game.region).filter((value):value is string=>!!value))).sort().map(region=><option key={region}>{region}</option>)}</select></label><label className="filter-item">Formato<select value={libraryFilterFormat} onChange={event=>setLibraryFilterFormat(event.target.value)}><option value="all">Todos</option>{Array.from(new Set(installedGames.map(game=>game.format.toLowerCase()))).sort().map(format=><option value={format} key={format}>{format.toUpperCase()}</option>)}</select></label>{(librarySearch || libraryFilterRegion!=="all" || libraryFilterFormat!=="all" || libraryFilterStatus!=="all") && <button type="button" className="button-quiet" onClick={()=>{setLibrarySearch("");setLibraryFilterRegion("all");setLibraryFilterFormat("all");setLibraryFilterStatus("all");}}>Limpar filtros</button>}</div>
-                        {!filteredInstalledGames.length?<div className="empty-state"><h3>Nenhum jogo encontrado</h3><p>{installedGames.length?"Nenhum resultado para os filtros aplicados.":"Configure a pasta de ROMs e clique em Sincronizar pasta."}</p></div>:<div className={viewMode==="grid"?"library-grid":"library-list"}>{filteredInstalledGames.map(game=><LibraryGameCard key={game.id} game={game} onOpen={()=>openInstalledGame(game)} onLaunch={()=>void launchGame(game.file_path)} onDelete={()=>setGameToDelete({id:game.id,title:game.title,filePath:game.file_path,coverUrl:game.cover_url || undefined})}/>)}</div>}
+                        {!filteredInstalledGames.length?<div className="empty-state"><h3>Nenhum jogo encontrado</h3><p>{installedGames.length?"Nenhum resultado para os filtros aplicados.":"Configure a pasta de ROMs e clique em Sincronizar pasta."}</p></div>:<div className={viewMode==="grid"?"library-grid":"library-list"}>{filteredInstalledGames.map(game=><LibraryGameCard key={game.id} game={game} onOpen={()=>openInstalledGame(game)} onLaunch={()=>void launchGame(game.file_path)} onDelete={()=>setGameToDelete({id:game.id,title:game.title,filePath:game.file_path,coverUrl:game.cover_url || undefined})} onHover={()=>prefetchGameBundle({id:game.id,title:game.title,serial:game.serial})}/>)}</div>}
                     </div>}
                     {activeTab === "search" && <>
                         <header className="page-heading search-page-header">
@@ -1494,6 +1516,7 @@ export default function App() {
                         onRefresh={async()=>{await Promise.all([fetchInstalledGames(),fetchFavorites(),fetchHistory()]);}} />}
                     {activeTab === "bios" && <BiosPage onShowToast={showToast} />}
                     {activeTab === "memory-cards" && <MemoryCardsPage />}
+                    {activeTab === "achievements" && <AchievementsPage onShowToast={showToast} />}
 
                     {activeTab === "game-page" && selectedGame && (
                         <div className="mod-page-view">
@@ -1568,12 +1591,24 @@ export default function App() {
                                             Compatibilidade PCSX2
                                         </button>
                                         {selectedGame.isInstalled && ([['covers','Capas'],['saves','Saves'],['cheats','Cheats'],['patches','Patches'],['textures','Texturas']] as [ResourceKind,string][]).map(([kind,label])=><button key={kind} className={`mod-tab-btn${detailSubTab===kind ? " active" : ""}`} onClick={()=>setDetailSubTab(kind)}>{label}</button>)}
+                                        {selectedGame.isInstalled && (
+                                            <button
+                                                className={`mod-tab-btn${detailSubTab === "achievements" ? " active" : ""}`}
+                                                onClick={() => setDetailSubTab("achievements")}
+                                            >
+                                                Conquistas
+                                            </button>
+                                        )}
                                     </div>
 
                                     <div className="mod-tab-content">
                                         {selectedGame.isInstalled && ['covers','saves','cheats','patches','textures'].includes(detailSubTab) && (()=>{
                                             const game=installedGames.find(g=>g.id===(selectedGame.installedId||selectedGame.id)||g.file_path===selectedGame.installedPath);
                                             return game ? <GameResourcesPanel key={`${game.id}:${detailSubTab}`} game={game} kind={detailSubTab as ResourceKind} /> : <p className="field-hint">Atualize a biblioteca para administrar este jogo.</p>;
+                                        })()}
+                                        {selectedGame.isInstalled && detailSubTab === "achievements" && (()=>{
+                                            const game=installedGames.find(g=>g.id===(selectedGame.installedId||selectedGame.id)||g.file_path===selectedGame.installedPath);
+                                            return game ? <AchievementsPage key={`${game.id}:achievements`} embeddedGameId={game.id} onShowToast={showToast} /> : <p className="field-hint">Atualize a biblioteca para consultar as conquistas deste jogo.</p>;
                                         })()}
 
                                         {detailSubTab === "info" && (

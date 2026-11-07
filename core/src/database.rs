@@ -118,13 +118,45 @@ pub fn initialize_db(db_path: &Path) -> Result<Connection> {
             updated_at TEXT NOT NULL,
             finished_at TEXT
         );
-        CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);",
+        CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+
+        CREATE TABLE IF NOT EXISTS ra_account_cache (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            username TEXT NOT NULL,
+            score INTEGER NOT NULL DEFAULT 0,
+            softcore_score INTEGER NOT NULL DEFAULT 0,
+            avatar_url TEXT NOT NULL DEFAULT '',
+            synced_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS ra_game_cache (
+            game_id TEXT PRIMARY KEY,
+            file_hash TEXT NOT NULL DEFAULT '',
+            boot_executable TEXT NOT NULL DEFAULT '',
+            ra_game_id INTEGER NOT NULL DEFAULT 0,
+            ra_title TEXT NOT NULL DEFAULT '',
+            icon_url TEXT NOT NULL DEFAULT '',
+            recognition_status TEXT NOT NULL DEFAULT 'pending',
+            recognition_message TEXT NOT NULL DEFAULT '',
+            total_achievements INTEGER NOT NULL DEFAULT 0,
+            unlocked_casual INTEGER NOT NULL DEFAULT 0,
+            unlocked_hardcore INTEGER NOT NULL DEFAULT 0,
+            points_total INTEGER NOT NULL DEFAULT 0,
+            points_earned_casual INTEGER NOT NULL DEFAULT 0,
+            points_earned_hardcore INTEGER NOT NULL DEFAULT 0,
+            achievements_json TEXT NOT NULL DEFAULT '[]',
+            file_size INTEGER NOT NULL DEFAULT 0,
+            file_mtime INTEGER NOT NULL DEFAULT 0,
+            synced_at TEXT NOT NULL
+        );",
     )?;
 
     let _ = conn.execute(
         "ALTER TABLE downloads ADD COLUMN connections INTEGER DEFAULT 1",
         [],
     );
+    let _ = conn.execute("ALTER TABLE ra_game_cache ADD COLUMN file_size INTEGER NOT NULL DEFAULT 0", []);
+    let _ = conn.execute("ALTER TABLE ra_game_cache ADD COLUMN file_mtime INTEGER NOT NULL DEFAULT 0", []);
 
     seed_default_configs(&conn)?;
     migrate_pcsx2_profiles(&mut conn)?;

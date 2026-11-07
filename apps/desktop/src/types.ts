@@ -41,3 +41,95 @@ export interface BiosImportResult {
     is_duplicate: boolean;
 }
 
+export interface Pcsx2AchievementsConfig {
+    enabled: boolean;
+    hardcore_mode: boolean;
+    encore_mode: boolean;
+    spectator_mode: boolean;
+    notifications: boolean;
+    sound_effects: boolean;
+    overlays: boolean;
+    pcsx2_username: string | null;
+}
+
+export interface RaAccountSummary {
+    username: string;
+    score: number;
+    softcore_score: number;
+    avatar_url: string;
+    profile_url: string;
+    synced_at: string;
+}
+
+export interface RaAchievementItem {
+    id: number;
+    title: string;
+    description: string;
+    points: number;
+    badge_name: string;
+    badge_url: string;
+    badge_locked_url: string;
+    kind: string | null;
+    unlocked_casual: boolean;
+    unlocked_hardcore: boolean;
+    official_url: string;
+}
+
+export interface RaGameProgress {
+    game_id: string;
+    game_title: string;
+    serial: string | null;
+    format: string;
+    file_hash: string;
+    boot_executable: string;
+    ra_game_id: number;
+    ra_title: string;
+    icon_url: string;
+    official_game_url: string | null;
+    recognition_status: string;
+    recognition_message: string;
+    total_achievements: number;
+    unlocked_casual: number;
+    unlocked_hardcore: number;
+    points_total: number;
+    points_earned_casual: number;
+    points_earned_hardcore: number;
+    achievements: RaAchievementItem[];
+    synced_at: string | null;
+    from_cache: boolean;
+    offline: boolean;
+}
+
+export interface RaGameSummaryRow {
+    game_id: string;
+    game_title: string;
+    serial: string | null;
+    format: string;
+    ra_game_id: number;
+    ra_title: string;
+    icon_url: string;
+    official_game_url: string | null;
+    recognition_status: string;
+    recognition_message: string;
+    total_achievements: number;
+    unlocked_casual: number;
+    unlocked_hardcore: number;
+    points_total: number;
+    points_earned_casual: number;
+    points_earned_hardcore: number;
+    synced_at: string | null;
+}
+
+export interface AchievementsState {
+    linked: boolean;
+    account: RaAccountSummary | null;
+    pcsx2: Pcsx2AchievementsConfig;
+    games: RaGameSummaryRow[];
+    offline: boolean;
+    notice: string | null;
+    syncing?: boolean;
+    sync_completed?: number;
+    sync_total?: number;
+    sync_current_game?: string | null;
+    cache_revision?: number;
+}

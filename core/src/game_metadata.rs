@@ -1,5 +1,6 @@
 use crate::database;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,21 +41,61 @@ pub fn get_compat_list() -> &'static [Pcsx2CompatEntry] {
     })
 }
 
+struct CompatIndex {
+    serials: HashMap<String, usize>,
+    exact_serials: HashMap<String, usize>,
+    titles: HashMap<String, usize>,
+    normalized_titles: Vec<String>,
+}
+
+static COMPAT_INDEX: OnceLock<CompatIndex> = OnceLock::new();
+
+fn normalize_serial(value: &str) -> String {
+    value.trim().to_uppercase().replace(['-', '_'], "")
+}
+
+fn compat_index() -> &'static CompatIndex {
+    COMPAT_INDEX.get_or_init(|| {
+        let list = get_compat_list();
+        let mut index = CompatIndex {
+            serials: HashMap::new(),
+            exact_serials: HashMap::new(),
+            titles: HashMap::new(),
+            normalized_titles: Vec::with_capacity(list.len()),
+        };
+        for (position, entry) in list.iter().enumerate() {
+            let serial = normalize_serial(&entry.serial);
+            if !serial.is_empty() {
+                index.serials.entry(serial).or_insert(position);
+            }
+            index
+                .exact_serials
+                .entry(entry.serial.to_ascii_uppercase())
+                .or_insert(position);
+            let title = normalize_for_match(&entry.title);
+            index.titles.entry(title.clone()).or_insert(position);
+            index.normalized_titles.push(title);
+        }
+        index
+    })
+}
+
+pub fn title_for_serial(serial: &str) -> Option<String> {
+    compat_index()
+        .exact_serials
+        .get(&serial.to_ascii_uppercase())
+        .map(|&position| get_compat_list()[position].title.clone())
+}
+
 pub fn find_compatibility(title: &str, serial: Option<&str>) -> Option<Pcsx2CompatEntry> {
     let list = get_compat_list();
+    let index = compat_index();
 
     if let Some(s) = serial {
-        let clean_s = s.trim().to_uppercase().replace("-", "").replace("_", "");
+        let clean_s = normalize_serial(s);
         if !clean_s.is_empty() {
-            for entry in list {
-                let entry_s = entry
-                    .serial
-                    .to_uppercase()
-                    .replace("-", "")
-                    .replace("_", "");
-                if entry_s == clean_s {
-                    return Some(entry.clone());
-                }
+            if let Some(&position) = index.serials.get(&clean_s) {
+                return Some(list[position].clone());
             }
         }
     }
@@ -64,26 +105,26 @@ pub fn find_compatibility(title: &str, serial: Option<&str>) -> Option<Pcsx2Comp
         return None;
     }
 
-    for entry in list {
-        let norm_entry = normalize_for_match(&entry.title);
-        if norm_entry == norm_title {
-            return Some(entry.clone());
-        }
+    if let Some(&position) = index.titles.get(&norm_title) {
+        return Some(list[position].clone());
     }
 
-    for entry in list {
-        let norm_entry = normalize_for_match(&entry.title);
-        if norm_entry.contains(&norm_title) || norm_title.contains(&norm_entry) {
-            return Some(entry.clone());
+    for (position, norm_entry) in index.normalized_titles.iter().enumerate() {
+        if norm_entry.contains(&norm_title) || norm_title.contains(norm_entry.as_str()) {
+            return Some(list[position].clone());
         }
     }
 
     None
 }
 
+fn strip_pattern() -> &'static regex::Regex {
+    static PATTERN: OnceLock<regex::Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| regex::Regex::new(r"\s*\([^)]*\)|\s*\[[^\]]*\]").unwrap())
+}
+
 fn normalize_for_match(s: &str) -> String {
-    let re = regex::Regex::new(r"\s*\([^)]*\)|\s*\[[^\]]*\]").unwrap();
-    let cleaned = re.replace_all(s, "");
+    let cleaned = strip_pattern().replace_all(s, "");
     cleaned
         .to_lowercase()
         .chars()
@@ -92,9 +133,22 @@ fn normalize_for_match(s: &str) -> String {
 }
 
 fn clean_game_title(title: &str) -> String {
-    let re = regex::Regex::new(r"\s*\([^)]*\)|\s*\[[^\]]*\]").unwrap();
-    let cleaned = re.replace_all(title, "");
+    let cleaned = strip_pattern().replace_all(title, "");
     cleaned.trim().to_string()
+}
+
+fn http_client() -> Option<reqwest::Client> {
+    static CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .user_agent("RomManager/1.0 (https://github.com/RomManager)")
+                .timeout(std::time::Duration::from_secs(5))
+                .pool_idle_timeout(std::time::Duration::from_secs(60))
+                .build()
+                .ok()
+        })
+        .clone()
 }
 
 async fn try_fetch_wikipedia_summary(
@@ -153,14 +207,7 @@ pub async fn fetch_game_description(title: &str) -> Option<(String, String)> {
         return None;
     }
 
-    let client = match reqwest::Client::builder()
-        .user_agent("RomManager/1.0 (https://github.com/RomManager)")
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return None,
-    };
+    let client = http_client()?;
 
     let pt_candidates = vec![
         clean_title.clone(),

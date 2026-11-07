@@ -1,15 +1,57 @@
 import { useState, useEffect } from "react";
 
+const resolved = new Map<string, string | null>();
+const MAX_RESOLVED = 1500;
+const STORAGE_KEY = "rom_cover_resolution";
+
+function loadStored() {
+    try {
+        const raw = sessionStorage.getItem(STORAGE_KEY);
+        if (!raw) return;
+        for (const [key, value] of JSON.parse(raw) as [string, string | null][]) resolved.set(key, value);
+    } catch {}
+}
+loadStored();
+
+let persistTimer: ReturnType<typeof setTimeout> | undefined;
+function remember(key: string, value: string | null) {
+    resolved.delete(key);
+    resolved.set(key, value);
+    while (resolved.size > MAX_RESOLVED) {
+        const oldest = resolved.keys().next().value;
+        if (oldest === undefined) break;
+        resolved.delete(oldest);
+    }
+    clearTimeout(persistTimer);
+    persistTimer = setTimeout(() => {
+        try { sessionStorage.setItem(STORAGE_KEY, JSON.stringify([...resolved.entries()])); } catch {}
+    }, 500);
+}
+
+const keyOf = (src: string | null | undefined, title: string) => `${src || ""}\u0000${title}`;
+
+function initial(src: string | null | undefined, title: string) {
+    const known = resolved.get(keyOf(src, title));
+    if (known === null) return { failed: true, current: "" };
+    if (known) return { failed: false, current: known };
+    return { failed: !src, current: src || "" };
+}
+
 export function CoverImage({ src, title, region, className, style }: { src?: string | null; title: string; region?: string; className?: string; style?: React.CSSProperties }) {
-    const [failed, setFailed] = useState(false);
+    const [failed, setFailed] = useState(() => initial(src, title).failed);
     const [attempt, setAttempt] = useState(0);
-    const [currentSrc, setCurrentSrc] = useState(src || "");
+    const [currentSrc, setCurrentSrc] = useState(() => initial(src, title).current);
 
     useEffect(() => {
-        setFailed(!src);
+        const next = initial(src, title);
+        setFailed(next.failed);
         setAttempt(0);
-        setCurrentSrc(src || "");
-    }, [src]);
+        setCurrentSrc(next.current);
+    }, [src, title]);
+
+    const handleLoad = () => {
+        if (currentSrc) remember(keyOf(src, title), currentSrc);
+    };
 
     const handleError = () => {
         if (attempt === 0) {
@@ -34,6 +76,7 @@ export function CoverImage({ src, title, region, className, style }: { src?: str
             setCurrentSrc(`https://raw.githubusercontent.com/libretro-thumbnails/Sony_-_PlayStation_2/master/Named_Boxarts/${encodeURIComponent(raw)}.png`);
             return;
         }
+        remember(keyOf(src, title), null);
         setFailed(true);
     };
 
@@ -63,10 +106,11 @@ export function CoverImage({ src, title, region, className, style }: { src?: str
             src={currentSrc}
             alt={title}
             loading="lazy"
+            decoding="async"
+            onLoad={handleLoad}
             onError={handleError}
             className={className}
             style={style}
         />
     );
 }
-

@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::Mutex,
-    time::{Duration, Instant},
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 
 pub static EDIT_LOCK: Mutex<()> = Mutex::new(());
@@ -44,8 +44,7 @@ pub fn name(value: &str) -> McResult<&str> {
     }
     Ok(value)
 }
-pub fn plain(path: &Path) -> McResult<()> {
-    let m = fs::symlink_metadata(path).map_err(err)?;
+pub fn plain_meta(m: &fs::Metadata) -> McResult<()> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
@@ -58,12 +57,15 @@ pub fn plain(path: &Path) -> McResult<()> {
     }
     Ok(())
 }
-pub fn read_bounded(path: &Path) -> McResult<Vec<u8>> {
-    plain(path)?;
-    if fs::metadata(path).map_err(err)?.len() > MAX_BYTES {
+pub fn plain(path: &Path) -> McResult<()> {
+    let m = fs::symlink_metadata(path).map_err(err)?;
+    plain_meta(&m)
+}
+fn read_checked_file(path: &Path, len: u64) -> McResult<Vec<u8>> {
+    if len > MAX_BYTES {
         return Err("Arquivo acima do limite de 128 MB".into());
     }
-    let mut data = Vec::new();
+    let mut data = Vec::with_capacity(len as usize);
     fs::File::open(path)
         .map_err(err)?
         .take(MAX_BYTES + 1)
@@ -74,17 +76,29 @@ pub fn read_bounded(path: &Path) -> McResult<Vec<u8>> {
     }
     Ok(data)
 }
-pub fn copy_tree(source: &Path, target: &Path) -> McResult<()> {
-    plain(source)?;
-    if source.is_file() {
-        let data = read_bounded(source)?;
-        let mut f = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(target)
-            .map_err(err)?;
-        f.write_all(&data).map_err(err)?;
+pub fn read_bounded(path: &Path) -> McResult<Vec<u8>> {
+    let m = fs::symlink_metadata(path).map_err(err)?;
+    plain_meta(&m)?;
+    read_checked_file(path, m.len())
+}
+fn write_new_file(target: &Path, data: &[u8], sync: bool) -> McResult<()> {
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)
+        .map_err(err)?;
+    f.write_all(data).map_err(err)?;
+    if sync {
         f.sync_all().map_err(err)?;
+    }
+    Ok(())
+}
+pub fn copy_tree(source: &Path, target: &Path) -> McResult<()> {
+    let m = fs::symlink_metadata(source).map_err(err)?;
+    plain_meta(&m)?;
+    if m.is_file() {
+        let data = read_checked_file(source, m.len())?;
+        write_new_file(target, &data, true)?;
     } else {
         fs::create_dir(target).map_err(err)?;
         let mut total = 0u64;
@@ -93,17 +107,19 @@ pub fn copy_tree(source: &Path, target: &Path) -> McResult<()> {
             .min_depth(1)
         {
             let e = entry.map_err(err)?;
-            plain(e.path())?;
+            let em = e.metadata().map_err(err)?;
+            plain_meta(&em)?;
             let relative = e.path().strip_prefix(source).map_err(err)?;
             let dst = target.join(relative);
-            if e.file_type().is_dir() {
+            if em.is_dir() {
                 fs::create_dir(&dst).map_err(err)?;
             } else {
-                total += e.metadata().map_err(err)?.len();
+                total += em.len();
                 if total > MAX_FOLDER_BYTES {
                     return Err("Cartão acima do limite de 1 GB".into());
                 }
-                copy_tree(e.path(), &dst)?;
+                let data = read_checked_file(e.path(), em.len())?;
+                write_new_file(&dst, &data, false)?;
             }
         }
     }
@@ -147,41 +163,94 @@ pub fn publish_new(source: &Path, target: &Path) -> McResult<()> {
     }
     result
 }
+fn subdir_entries(sub: &Path) -> McResult<(u64, Vec<String>)> {
+    let mut stamp = Vec::new();
+    let mut raw_entries = Vec::new();
+    for entry in walkdir::WalkDir::new(sub).min_depth(1).follow_links(false) {
+        let entry = entry.map_err(err)?;
+        let m = entry.metadata().map_err(err)?;
+        plain_meta(&m)?;
+        let rel = entry
+            .path()
+            .strip_prefix(sub)
+            .map_err(err)?
+            .to_string_lossy()
+            .into_owned();
+        let modified = m
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        stamp.push((rel.clone(), m.is_dir(), m.len(), modified));
+        raw_entries.push((rel, entry.into_path(), m.is_dir(), m.len()));
+    }
+    stamp.sort_by(|a, b| a.0.cmp(&b.0));
+    let key = sub.to_path_buf();
+    if let Some(cached) = crate::cache::DIR_ENTRIES.get(&key, &stamp) {
+        return Ok(cached);
+    }
+    let mut total = 0u64;
+    let mut lines = Vec::with_capacity(raw_entries.len());
+    for (rel, full_path, is_dir, len) in raw_entries {
+        if is_dir {
+            lines.push(format!("{rel}:dir"));
+        } else {
+            total += len;
+            if total > MAX_FOLDER_BYTES {
+                return Err("Cartão acima do limite".into());
+            }
+            let b = read_checked_file(&full_path, len)?;
+            lines.push(format!("{rel}:{}", digest(&b)));
+        }
+    }
+    let value = (total, lines);
+    crate::cache::DIR_ENTRIES.put(key, stamp, value.clone());
+    Ok(value)
+}
 pub fn fingerprint(path: &Path) -> McResult<String> {
     if path.is_file() {
+        let stamp = crate::cache::FileStamp::of(path);
+        let key = path.to_path_buf();
+        if let Some(stamp) = &stamp {
+            if let Some(snapshot) = crate::cache::CARD_FILES.get(&key, stamp) {
+                return Ok(snapshot.revision);
+            }
+        }
         return Ok(digest(&read_bounded(path)?));
     }
     plain(path)?;
     let mut entries = Vec::new();
     let mut total = 0u64;
-    for entry in walkdir::WalkDir::new(path).min_depth(1).follow_links(false) {
-        let entry = entry.map_err(err)?;
-        plain(entry.path())?;
-        if entry.file_type().is_dir() {
-            entries.push(format!(
-                "{}:dir",
-                entry
-                    .path()
-                    .strip_prefix(path)
-                    .map_err(err)?
-                    .to_string_lossy()
-            ));
+    for item in fs::read_dir(path).map_err(err)? {
+        let item = item.map_err(err)?;
+        let m = item.metadata().map_err(err)?;
+        plain_meta(&m)?;
+        let item_name = item.file_name().to_string_lossy().into_owned();
+        if item_name.starts_with('.') {
+            continue;
         }
-        if entry.file_type().is_file() {
-            let b = read_bounded(entry.path())?;
-            total += b.len() as u64;
+        let item_path = item.path();
+        if m.is_dir() {
+            entries.push(format!("{item_name}:dir"));
+            let (sub_total, sub_lines) = subdir_entries(&item_path)?;
+            total += sub_total;
             if total > MAX_FOLDER_BYTES {
                 return Err("Cartão acima do limite".into());
             }
-            entries.push(format!(
-                "{}:{}",
-                entry
-                    .path()
-                    .strip_prefix(path)
-                    .map_err(err)?
-                    .to_string_lossy(),
-                digest(&b)
-            ));
+            for line in sub_lines {
+                entries.push(format!(
+                    "{}",
+                    Path::new(&item_name).join(line).to_string_lossy()
+                ));
+            }
+        } else if m.is_file() {
+            total += m.len();
+            if total > MAX_FOLDER_BYTES {
+                return Err("Cartão acima do limite".into());
+            }
+            let b = read_checked_file(&item_path, m.len())?;
+            entries.push(format!("{item_name}:{}", digest(&b)));
         }
     }
     entries.sort();
@@ -495,10 +564,31 @@ impl CardReader {
         Ok(free)
     }
 }
+fn file_snapshot(path: &Path) -> McResult<crate::cache::CardSnapshot> {
+    let stamp = crate::cache::FileStamp::of(path);
+    let key = path.to_path_buf();
+    if let Some(stamp) = &stamp {
+        if let Some(snapshot) = crate::cache::CARD_FILES.get(&key, stamp) {
+            return Ok(snapshot);
+        }
+    }
+    let bytes = read_bounded(path)?;
+    let revision = digest(&bytes);
+    let reader = CardReader::open(&bytes)?;
+    let snapshot = crate::cache::CardSnapshot {
+        saves: reader.saves()?,
+        free: Some(reader.free()?),
+        revision,
+    };
+    if let Some(stamp) = stamp {
+        crate::cache::CARD_FILES.put(key, stamp, snapshot.clone());
+    }
+    Ok(snapshot)
+}
 pub fn inspect(path: &Path) -> McResult<(Vec<SaveInfo>, Option<u64>)> {
     if path.is_file() {
-        let c = CardReader::open(&read_bounded(path)?)?;
-        return Ok((c.saves()?, Some(c.free()?)));
+        let snapshot = file_snapshot(path)?;
+        return Ok((snapshot.saves, snapshot.free));
     }
     plain(path)?;
     if !path.join("_pcsx2_superblock").exists() {
@@ -507,32 +597,44 @@ pub fn inspect(path: &Path) -> McResult<(Vec<SaveInfo>, Option<u64>)> {
     let mut saves = Vec::new();
     for e in fs::read_dir(path).map_err(err)? {
         let e = e.map_err(err)?;
-        plain(&e.path())?;
-        if e.path().is_dir() && !e.file_name().to_string_lossy().starts_with('_') {
+        let em = e.metadata().map_err(err)?;
+        plain_meta(&em)?;
+        let folder_name = e.file_name().to_string_lossy().into_owned();
+        if em.is_dir() && !folder_name.starts_with('_') && !folder_name.starts_with('.') {
+            let sub_path = e.path();
             let mut size = 0;
             let mut files = 0;
-            for f in walkdir::WalkDir::new(e.path())
+            for f in walkdir::WalkDir::new(&sub_path)
                 .follow_links(false)
                 .into_iter()
                 .filter_entry(|entry| !entry.file_name().to_string_lossy().starts_with("_pcsx2_"))
             {
                 let f = f.map_err(err)?;
-                plain(f.path())?;
-                if f.file_type().is_file() {
-                    size += f.metadata().map_err(err)?.len();
+                let fm = f.metadata().map_err(err)?;
+                plain_meta(&fm)?;
+                if fm.is_file() {
+                    size += fm.len();
                     files += 1;
                 }
             }
-            saves.push(SaveInfo {
-                title: read_bounded(&e.path().join("icon.sys"))
+            let icon_path = sub_path.join("icon.sys");
+            let stamp = (size, files, crate::cache::FileStamp::of(&icon_path));
+            if let Some(cached) = crate::cache::SAVE_FOLDERS.get(&sub_path, &stamp) {
+                saves.push(cached);
+                continue;
+            }
+            let info = SaveInfo {
+                title: read_bounded(&icon_path)
                     .ok()
                     .and_then(|b| icon_title(&b))
                     .unwrap_or_default(),
-                serial: save_serial(&e.file_name().to_string_lossy()),
-                name: e.file_name().to_string_lossy().into(),
+                serial: save_serial(&folder_name),
+                name: folder_name,
                 size,
                 files,
-            });
+            };
+            crate::cache::SAVE_FOLDERS.put(sub_path, stamp, info.clone());
+            saves.push(info);
         }
     }
     Ok((saves, None))
@@ -553,6 +655,8 @@ pub fn list_for(
     let dir = cards_dir(conn)?;
     let ini = fs::read_to_string(data_dir(conn)?.join("inis/PCSX2.ini")).unwrap_or_default();
     let mut cards = Vec::new();
+    let mut titles: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
     if dir.exists() {
         plain(&dir)?;
         for e in fs::read_dir(&dir).map_err(err)? {
@@ -567,10 +671,24 @@ pub fn list_for(
             if !e.path().is_dir() && !n.to_lowercase().ends_with(".ps2") {
                 continue;
             }
+            let mut revision = String::new();
             let analysis = if summary {
                 Ok((Vec::new(), None))
+            } else if e.path().is_file() {
+                match file_snapshot(&e.path()) {
+                    Ok(snapshot) => {
+                        revision = snapshot.revision.clone();
+                        Ok((snapshot.saves, snapshot.free))
+                    }
+                    Err(error) => {
+                        revision = fingerprint(&e.path()).unwrap_or_default();
+                        Err(error)
+                    }
+                }
             } else {
-                inspect(&e.path())
+                let res = inspect(&e.path());
+                revision = fingerprint(&e.path()).unwrap_or_default();
+                res
             };
             let (mut saves, free_bytes, error) = match analysis {
                 Ok((s, f)) => (s, f, None),
@@ -578,19 +696,18 @@ pub fn list_for(
             };
             for save in &mut saves {
                 if let Some(serial) = &save.serial {
-                    let title: Option<String> = conn
-                        .query_row(
-                            "SELECT title FROM games WHERE serial=?1 ORDER BY title LIMIT 1",
-                            [serial],
-                            |r| r.get(0),
-                        )
-                        .ok()
-                        .or_else(|| {
-                            crate::game_metadata::get_compat_list()
-                                .iter()
-                                .find(|g| g.serial.eq_ignore_ascii_case(serial))
-                                .map(|g| g.title.clone())
-                        });
+                    let title = titles
+                        .entry(serial.clone())
+                        .or_insert_with(|| {
+                            conn.query_row(
+                                "SELECT title FROM games WHERE serial=?1 ORDER BY title LIMIT 1",
+                                [serial],
+                                |r| r.get::<_, String>(0),
+                            )
+                            .ok()
+                            .or_else(|| crate::game_metadata::title_for_serial(serial))
+                        })
+                        .clone();
                     if let Some(title) = title {
                         save.title = title;
                     }
@@ -610,11 +727,7 @@ pub fn list_for(
                 name: n,
                 kind: if e.path().is_dir() { "folder" } else { "file" }.into(),
                 size: e.metadata().map_err(err)?.len(),
-                revision: if summary {
-                    String::new()
-                } else {
-                    fingerprint(&e.path()).unwrap_or_default()
-                },
+                revision,
                 saves,
                 save_count,
                 free_bytes,
@@ -689,6 +802,22 @@ fn check_installation(conn: &Connection, id: &str) -> McResult<()> {
         Ok(())
     }
 }
+fn cleanup_stale_siblings(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with(".rommanager-new-") || name.starts_with(".rommanager-save-new-") {
+            let p = entry.path();
+            if p.is_dir() {
+                let _ = fs::remove_dir_all(p);
+            } else {
+                let _ = fs::remove_file(p);
+            }
+        }
+    }
+}
 pub fn action(conn: &Connection, db: &Path, p: CardAction) -> McResult<ActionResult> {
     let _guard = EDIT_LOCK.lock().map_err(err)?;
     writable()?;
@@ -696,6 +825,7 @@ pub fn action(conn: &Connection, db: &Path, p: CardAction) -> McResult<ActionRes
     let dir = cards_dir(conn)?;
     fs::create_dir_all(&dir).map_err(err)?;
     plain(&dir)?;
+    cleanup_stale_siblings(&dir);
     let temp = store(db).join("staging").join(stamp());
     fs::create_dir_all(&temp).map_err(err)?;
     let run = (|| {
@@ -748,7 +878,6 @@ pub fn action(conn: &Connection, db: &Path, p: CardAction) -> McResult<ActionRes
                             &temp,
                         )?;
                     }
-                    run_tool(db, &staged, "check", &[], &temp)?;
                     let output = inspect(&staged)?.0;
                     let input = inspect(&card)?.0;
                     if output.len() != input.len()
@@ -939,7 +1068,6 @@ pub fn action(conn: &Connection, db: &Path, p: CardAction) -> McResult<ActionRes
                 if !inspect(&staged)?.0.iter().any(|s| s.name == *save) {
                     return Err("A importação não produziu o save esperado".into());
                 }
-                run_tool(db, &staged, "check", &[], &temp)?;
                 replace(conn, db, &card, &staged, &p)
             }
             _ => Err("Operação desconhecida".into()),
@@ -959,7 +1087,6 @@ fn replace(
     writable()?;
     check_revision(card, &p.revision)?;
     let b = backup(db, card)?;
-    // Stage beside the card so rename stays on its filesystem.
     let sibling = card.with_file_name(format!(".rommanager-{}", stamp()));
     copy_tree(stage, &sibling)?;
     let old = card.with_file_name(format!(".rommanager-old-{}", stamp()));
@@ -1049,7 +1176,7 @@ pub async fn remove_tool(db: &Path) -> McResult<()> {
     let _tool = TOOL_LOCK.lock().await;
     let _edit = EDIT_LOCK
         .try_lock()
-        .map_err(|_| "Aguarde a opera??o de cart?es terminar.")?;
+        .map_err(|_| "Aguarde a operação de cartões terminar.")?;
     writable()?;
     let folder = store(db).join("tools");
     if folder.exists() {

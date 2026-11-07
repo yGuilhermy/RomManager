@@ -2,13 +2,13 @@ import type { InstalledGame } from "../types";
 import { CoverImage } from "./CoverImage";
 import { formatBytes } from "../lib/format";
 
-interface Props { game:InstalledGame; onOpen:()=>void; onLaunch:()=>void; onDelete:()=>void; busy?:boolean; }
-export function LibraryGameCard({game,onOpen,onLaunch,onDelete,busy=false}:Props) {
+interface Props { game:InstalledGame; onOpen:()=>void; onLaunch:()=>void; onDelete:()=>void; onHover?:()=>void; busy?:boolean; }
+export function LibraryGameCard({game,onOpen,onLaunch,onDelete,onHover,busy=false}:Props) {
     const isMissing = Boolean(game.is_missing);
     const discMatch = game.title.match(/(?:disc|disco)\s*(\d+)/i);
     const discLabel = discMatch ? `Disco ${discMatch[1]}` : null;
 
-    return <article className={`library-game-card${isMissing ? " is-missing" : ""}`}>
+    return <article className={`library-game-card${isMissing ? " is-missing" : ""}`} onMouseEnter={onHover} onFocus={onHover}>
         <button type="button" className="library-game-cover" onClick={onOpen} aria-label={`Detalhes de ${game.title}`}>
             <CoverImage src={game.cover_url} title={game.title} region={game.region || undefined} />
         </button>

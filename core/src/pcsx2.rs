@@ -175,6 +175,26 @@ fn extract_pe_version(bytes: &[u8]) -> Option<String> {
 }
 
 pub fn extract_pcsx2_version(exe_path: &Path) -> String {
+    use crate::cache::{EXE_VERSIONS, FileStamp};
+    let stamp = (
+        FileStamp::of(exe_path),
+        exe_path
+            .parent()
+            .and_then(|p| FileStamp::of(&p.join("version.json"))),
+    );
+    if stamp.0.is_none() {
+        return read_pcsx2_version(exe_path);
+    }
+    let key = exe_path.to_path_buf();
+    if let Some(version) = EXE_VERSIONS.get(&key, &stamp) {
+        return version;
+    }
+    let version = read_pcsx2_version(exe_path);
+    EXE_VERSIONS.put(key, stamp, version.clone());
+    version
+}
+
+fn read_pcsx2_version(exe_path: &Path) -> String {
     if !exe_path.exists() || !exe_path.is_file() {
         return "Não encontrado".to_string();
     }
@@ -236,28 +256,32 @@ pub fn inspect_installation(exe_path: &Path) -> Result<Pcsx2Installation, String
     let data_dir = if is_portable {
         parent_dir.to_path_buf()
     } else {
-        let mut documents = Command::new("powershell.exe");
-        documents.args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "[Environment]::GetFolderPath('MyDocuments')",
-        ]);
-        #[cfg(windows)]
-        let documents = {
-            use std::os::windows::process::CommandExt;
-            documents.creation_flags(0x08000000);
-            documents.output().ok()
-        };
-        #[cfg(not(windows))]
-        let documents: Option<std::process::Output> = None;
-        documents
-            .filter(|o| o.status.success())
-            .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()).join("PCSX2"))
-            .unwrap_or_else(|| {
-                PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default())
-                    .join("Documents/PCSX2")
+        crate::cache::USER_DIR
+            .get_or_init(|| {
+                let mut documents = Command::new("powershell.exe");
+                documents.args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "[Environment]::GetFolderPath('MyDocuments')",
+                ]);
+                #[cfg(windows)]
+                let documents = {
+                    use std::os::windows::process::CommandExt;
+                    documents.creation_flags(0x08000000);
+                    documents.output().ok()
+                };
+                #[cfg(not(windows))]
+                let documents: Option<std::process::Output> = None;
+                documents
+                    .filter(|o| o.status.success())
+                    .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()).join("PCSX2"))
+                    .unwrap_or_else(|| {
+                        PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default())
+                            .join("Documents/PCSX2")
+                    })
             })
+            .clone()
     };
 
     let bios_dir = data_dir.join("bios");
@@ -631,8 +655,7 @@ pub fn scan_bios_directory(bios_dir: &Path, active_bios_path: Option<&str>) -> V
                     continue;
                 }
 
-                if let Ok(bytes) = fs::read(&path) {
-                    let sha1 = compute_sha1(&bytes);
+                if let Some(sha1) = crate::cache::bios_sha1(&path) {
                     let filename = path
                         .file_name()
                         .and_then(|f| f.to_str())

@@ -1,5 +1,7 @@
 import { useEffect, useState, useRef } from "react";
-import { apiJson, cachedPcsx2Json, invalidatePcsx2Cache } from "../lib/api";
+import { apiJson, cachedPcsx2Json, invalidatePcsx2Cache, peekPcsx2Json } from "../lib/api";
+import { subscribe } from "../lib/smartCache";
+import { CARDS_SUMMARY_PATH, cardPath, defaultCardName } from "../lib/prefetcher";
 import { MemoryCardToolCard } from "./MemoryCardToolCard";
 import { BrowsePathButton } from "./BrowsePathButton";
 import { saveGeneratedFile } from "../lib/nativeFiles";
@@ -24,8 +26,11 @@ type State = {
 };
 type Result = { message: string; path: string; backup: string | null };
 export function MemoryCardsPage({ gameSerial, embedded = false }: { gameSerial?: string | null; embedded?: boolean }) {
-  const [data, setData] = useState<State | null>(null),
-    [selected, setSelected] = useState("");
+  const [data, setData] = useState<State | null>(() => peekPcsx2Json<State>(CARDS_SUMMARY_PATH) ?? null),
+    [selected, setSelected] = useState(() => {
+      const cached = peekPcsx2Json<State>(CARDS_SUMMARY_PATH);
+      return cached ? defaultCardName(cached.cards) : "";
+    });
   const [busy, setBusy] = useState(false),
     [error, setError] = useState(""),
     [result, setResult] = useState<Result | null>(null);
@@ -67,18 +72,23 @@ export function MemoryCardsPage({ gameSerial, embedded = false }: { gameSerial?:
   const load = async (force = false) => {
     setError("");
     try {
-      if (force) invalidatePcsx2Cache();
-      const next = await cachedPcsx2Json<State>("/api/pcsx2/memory-cards?summary=true");
+      if (force) invalidatePcsx2Cache("/api/pcsx2/memory-cards");
+      const next = await cachedPcsx2Json<State>(CARDS_SUMMARY_PATH);
+      const nextSelected = next.cards.some((c) => c.name === selected)
+        ? selected
+        : next.cards.find((c) => c.slots.includes(1))?.name ||
+          next.cards.find((c) => c.kind === "file")?.name ||
+          next.cards[0]?.name ||
+          "";
       setData(next);
+      setSelected(nextSelected);
+      if (force && nextSelected) {
+        const detailState = await cachedPcsx2Json<State>(cardPath(nextSelected));
+        if (detailState.installation_id === next.installation_id) {
+          setDetail(detailState.cards[0] || null);
+        }
+      }
       if (force) setGeneration((value) => value + 1);
-      setSelected((old) =>
-        next.cards.some((c) => c.name === old)
-          ? old
-          : next.cards.find((c) => c.slots.includes(1))?.name ||
-            next.cards.find((c) => c.kind === "file")?.name ||
-            next.cards[0]?.name ||
-            "",
-      );
     } catch (e) {
       setError(
         e instanceof Error ? e.message : "Não foi possível ler os cartões.",
@@ -88,12 +98,24 @@ export function MemoryCardsPage({ gameSerial, embedded = false }: { gameSerial?:
   useEffect(() => {
     void load();
   }, []);
+  useEffect(() => subscribe(key => {
+    if (key !== CARDS_SUMMARY_PATH) return;
+    const next = peekPcsx2Json<State>(key);
+    if (next) setData(next);
+  }), []);
   useEffect(() => {
     if (!selected || !data?.installation_id) { setDetail(null); return; }
     let active = true;
-    setReading(true);
-    setDetail(null);
-    cachedPcsx2Json<State>(`/api/pcsx2/memory-cards?card=${encodeURIComponent(selected)}`)
+    const path = cardPath(selected);
+    const cached = peekPcsx2Json<State>(path);
+    if (cached && cached.installation_id === data.installation_id) {
+      setDetail(cached.cards[0] || null);
+      setReading(false);
+    } else {
+      setReading(true);
+      setDetail((current) => (current?.name === selected ? current : null));
+    }
+    cachedPcsx2Json<State>(path)
       .then((state) => {
         if (!active) return;
         if (state.installation_id !== data.installation_id) throw new Error("Instalação mudou. Atualize os cartões.");
@@ -101,7 +123,12 @@ export function MemoryCardsPage({ gameSerial, embedded = false }: { gameSerial?:
       })
       .catch((e) => { if (active) setError(e instanceof Error ? e.message : "Não foi possível ler o cartão."); })
       .finally(() => { if (active) setReading(false); });
-    return () => { active = false; };
+    const stop = subscribe(key => {
+      if (!active || key !== path) return;
+      const next = peekPcsx2Json<State>(path);
+      if (next && next.installation_id === data.installation_id) setDetail(next.cards[0] || null);
+    });
+    return () => { active = false; stop(); };
   }, [selected, data?.installation_id, generation]);
   const action = async (
     action: string,
@@ -386,7 +413,7 @@ export function MemoryCardsPage({ gameSerial, embedded = false }: { gameSerial?:
                           <div className="save-row-actions">
                           <button
                             className="button-secondary"
-                            disabled={disabled || !data.tool_ready}
+                            disabled={disabled || (card.kind === "file" && !data.tool_ready)}
                             onClick={() =>
                               void action("export", { save: save.name })
                             }
@@ -394,7 +421,7 @@ export function MemoryCardsPage({ gameSerial, embedded = false }: { gameSerial?:
                             Exportar PSU
                           </button>
                             <button type="button" className="button-secondary" disabled={disabled || data.cards.length<2 || (card.kind==="file"&&!data.tool_ready)} onClick={()=>{setSaveOperation({kind:"move-save",save});setDestination("");setError("");}}>Mover</button>
-                            <button type="button" className="button-quiet danger-text" disabled={disabled || (card.kind==="file"&&!data.tool_ready)} onClick={()=>{setSaveOperation({kind:"delete-save",save});setDestination("");setError("");}}>Excluir</button>
+                            <button type="button" className="button-quiet danger-text" disabled={disabled} onClick={()=>{setSaveOperation({kind:"delete-save",save});setDestination("");setError("");}}>Excluir</button>
                           </div>
                         </article>
                       ))}

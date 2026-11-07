@@ -42,8 +42,9 @@ fn payload_digest(folder: &Path) -> R<String> {
         .filter_entry(|e| !e.file_name().to_string_lossy().starts_with("_pcsx2_"))
     {
         let item = item.map_err(e)?;
-        mc::plain(item.path())?;
-        if item.file_type().is_file() {
+        let m = item.metadata().map_err(e)?;
+        mc::plain_meta(&m)?;
+        if m.is_file() {
             parts.push(format!(
                 "{}:{}",
                 item.path()
@@ -67,14 +68,13 @@ fn saved_payload(db: &Path, card: &Path, save: &str, work: &Path) -> R<String> {
     save_formats::psu_to_folder(&bytes, &unpacked)?;
     payload_digest(&unpacked.join(save))
 }
-fn delete_staged(db: &Path, stage: &Path, save: &str, work: &Path) -> R<()> {
+fn delete_staged(_db: &Path, stage: &Path, save: &str, _work: &Path) -> R<()> {
     if stage.is_dir() {
         let selected = stage.join(save);
         mc::plain(&selected)?;
         remove(&selected)?;
     } else {
         mc::delete_save_file(stage, save)?;
-        mc::run_tool(db, stage, "check", &[], work)?;
     }
     if mc::inspect(stage)?.0.iter().any(|s| s.name == save) {
         return Err("O save ainda está presente na cópia de trabalho.".into());
@@ -89,13 +89,43 @@ fn same_saves(original: &[mc::SaveInfo], edited: &[mc::SaveInfo], excluded: &str
     }) && edited.iter().filter(|s| s.name != excluded).count()
         == original.iter().filter(|s| s.name != excluded).count()
 }
-// Each replacement is prepared beside its card; ordinary publication failures roll back in reverse order.
+fn backup_folder_save(card: &Path, save: &str, dest_card: &Path, require_save: bool) -> R<()> {
+    mc::plain(card)?;
+    fs::create_dir_all(dest_card).map_err(e)?;
+    for item in fs::read_dir(card).map_err(e)? {
+        let item = item.map_err(e)?;
+        let m = item.metadata().map_err(e)?;
+        mc::plain_meta(&m)?;
+        let name = item.file_name().to_string_lossy().into_owned();
+        if m.is_file() && name.starts_with("_pcsx2_") {
+            mc::copy_tree(&item.path(), &dest_card.join(&name))?;
+        }
+    }
+    let save_src = card.join(save);
+    if save_src.exists() {
+        mc::plain(&save_src)?;
+        let save_dst = dest_card.join(save);
+        mc::copy_tree(&save_src, &save_dst)?;
+        if payload_digest(&save_src)? != payload_digest(&save_dst)? {
+            return Err("Backup do save divergente.".into());
+        }
+    } else if require_save {
+        return Err("Save não encontrado para backup.".into());
+    }
+    Ok(())
+}
+enum SwapKind {
+    Card,
+    FolderPut { had_original: bool },
+    FolderDelete,
+}
 struct Swap {
     card: PathBuf,
     sibling: PathBuf,
     old: PathBuf,
     expected: String,
     published: bool,
+    kind: SwapKind,
 }
 impl Swap {
     fn prepare(card: &Path, stage: &Path) -> R<Self> {
@@ -120,18 +150,83 @@ impl Swap {
             old: card.with_file_name(format!(".rommanager-save-old-{}", mc::stamp())),
             expected,
             published: false,
+            kind: SwapKind::Card,
+        })
+    }
+    fn prepare_folder_put(card: &Path, save: &str, stage_save: &Path) -> R<Self> {
+        mc::plain(card)?;
+        let target_save = card.join(save);
+        let had_original = target_save.exists();
+        if had_original {
+            mc::plain(&target_save)?;
+        }
+        let sibling = card.join(format!(".rommanager-save-new-{}", mc::stamp()));
+        let expected = payload_digest(stage_save)?;
+        if let Err(error) = mc::copy_tree(stage_save, &sibling) {
+            if sibling.exists() {
+                let _ = remove(&sibling);
+            }
+            return Err(error);
+        }
+        if payload_digest(&sibling)? != expected {
+            let _ = remove(&sibling);
+            return Err("Cópia de publicação divergente.".into());
+        }
+        Ok(Self {
+            card: target_save,
+            sibling,
+            old: card.join(format!(".rommanager-save-old-{}", mc::stamp())),
+            expected,
+            published: false,
+            kind: SwapKind::FolderPut { had_original },
+        })
+    }
+    fn prepare_folder_delete(card: &Path, save: &str) -> R<Self> {
+        mc::plain(card)?;
+        let target_save = card.join(save);
+        mc::plain(&target_save)?;
+        Ok(Self {
+            card: target_save,
+            sibling: PathBuf::new(),
+            old: card.join(format!(".rommanager-save-old-{}", mc::stamp())),
+            expected: String::new(),
+            published: false,
+            kind: SwapKind::FolderDelete,
         })
     }
     fn publish(&mut self) -> R<()> {
-        fs::rename(&self.card, &self.old).map_err(e)?;
-        if let Err(error) = fs::rename(&self.sibling, &self.card) {
-            fs::rename(&self.old, &self.card).map_err(|rollback| {
-                format!(
-                    "Falha ao publicar: {error}; original preservado em {}: {rollback}",
-                    self.old.display()
-                )
-            })?;
-            return Err(e(error));
+        match self.kind {
+            SwapKind::Card => {
+                fs::rename(&self.card, &self.old).map_err(e)?;
+                if let Err(error) = fs::rename(&self.sibling, &self.card) {
+                    fs::rename(&self.old, &self.card).map_err(|rollback| {
+                        format!(
+                            "Falha ao publicar: {error}; original preservado em {}: {rollback}",
+                            self.old.display()
+                        )
+                    })?;
+                    return Err(e(error));
+                }
+            }
+            SwapKind::FolderPut { had_original } => {
+                if had_original {
+                    fs::rename(&self.card, &self.old).map_err(e)?;
+                }
+                if let Err(error) = fs::rename(&self.sibling, &self.card) {
+                    if had_original {
+                        fs::rename(&self.old, &self.card).map_err(|rollback| {
+                            format!(
+                                "Falha ao publicar: {error}; original preservado em {}: {rollback}",
+                                self.old.display()
+                            )
+                        })?;
+                    }
+                    return Err(e(error));
+                }
+            }
+            SwapKind::FolderDelete => {
+                fs::rename(&self.card, &self.old).map_err(e)?;
+            }
         }
         self.published = true;
         Ok(())
@@ -140,16 +235,38 @@ impl Swap {
         if !self.published {
             return Ok(());
         }
-        if mc::fingerprint(&self.card)? != self.expected {
-            return Err(
-                "O destino foi alterado externamente; o backup foi preservado para recuperação."
-                    .into(),
-            );
-        }
-        fs::rename(&self.card, &self.sibling).map_err(e)?;
-        if let Err(error) = fs::rename(&self.old, &self.card) {
-            let _ = fs::rename(&self.sibling, &self.card);
-            return Err(e(error));
+        match self.kind {
+            SwapKind::Card => {
+                if mc::fingerprint(&self.card)? != self.expected {
+                    return Err(
+                        "O destino foi alterado externamente; o backup foi preservado para recuperação."
+                            .into(),
+                    );
+                }
+                fs::rename(&self.card, &self.sibling).map_err(e)?;
+                if let Err(error) = fs::rename(&self.old, &self.card) {
+                    let _ = fs::rename(&self.sibling, &self.card);
+                    return Err(e(error));
+                }
+            }
+            SwapKind::FolderPut { had_original } => {
+                if payload_digest(&self.card)? != self.expected {
+                    return Err(
+                        "O destino foi alterado externamente; o backup foi preservado para recuperação."
+                            .into(),
+                    );
+                }
+                fs::rename(&self.card, &self.sibling).map_err(e)?;
+                if had_original {
+                    if let Err(error) = fs::rename(&self.old, &self.card) {
+                        let _ = fs::rename(&self.sibling, &self.card);
+                        return Err(e(error));
+                    }
+                }
+            }
+            SwapKind::FolderDelete => {
+                fs::rename(&self.old, &self.card).map_err(e)?;
+            }
         }
         self.published = false;
         Ok(())
@@ -157,7 +274,7 @@ impl Swap {
 }
 impl Drop for Swap {
     fn drop(&mut self) {
-        if self.sibling.exists() {
+        if !self.sibling.as_os_str().is_empty() && self.sibling.exists() {
             let _ = remove(&self.sibling);
         }
         if self.published && self.old.exists() {
@@ -217,12 +334,18 @@ pub fn edit(
         }
         destination = Some(path);
     }
-    let source_stage = temp.join(if card.is_dir() {
-        "source-folder"
+    let source_stage = if card.is_dir() {
+        mc::plain(&card.join(&p.save))?;
+        None
     } else {
-        "source.ps2"
-    });
-    mc::copy_tree(card, &source_stage)?;
+        let stage = temp.join("source.ps2");
+        mc::copy_tree(card, &stage)?;
+        delete_staged(db, &stage, &p.save, temp)?;
+        if !same_saves(&original, &mc::inspect(&stage)?.0, &p.save) {
+            return Err("A cópia de trabalho alterou outros saves.".into());
+        }
+        Some(stage)
+    };
     let mut destination_stage = None;
     if let Some(target) = &destination {
         let stage = temp.join(if target.is_dir() {
@@ -230,9 +353,17 @@ pub fn edit(
         } else {
             "destination.ps2"
         });
-        mc::copy_tree(target, &stage)?;
-        if original_destination.iter().any(|s| s.name == p.save) {
-            delete_staged(db, &stage, &p.save, temp)?;
+        if target.is_dir() {
+            fs::create_dir_all(&stage).map_err(e)?;
+            let sb = target.join("_pcsx2_superblock");
+            if sb.exists() {
+                mc::copy_tree(&sb, &stage.join("_pcsx2_superblock"))?;
+            }
+        } else {
+            mc::copy_tree(target, &stage)?;
+            if original_destination.iter().any(|s| s.name == p.save) {
+                delete_staged(db, &stage, &p.save, temp)?;
+            }
         }
         if card.is_dir() && stage.is_dir() {
             mc::copy_tree(&card.join(&p.save), &stage.join(&p.save))?;
@@ -249,16 +380,27 @@ pub fn edit(
                 }
                 let psu = temp.join("incoming.psu");
                 fs::write(&psu, bytes).map_err(e)?;
-                mc::run_tool(db,&stage,"import",&[psu.to_string_lossy().into()],temp).map_err(|error|format!("Não foi possível importar no destino; verifique o espaço livre. {error}"))?;
-                mc::run_tool(db, &stage, "check", &[], temp)?;
+                mc::run_tool(db, &stage, "import", &[psu.to_string_lossy().into()], temp).map_err(
+                    |error| {
+                        format!(
+                            "Não foi possível importar no destino; verifique o espaço livre. {error}"
+                        )
+                    },
+                )?;
             }
         }
         let edited = mc::inspect(&stage)?.0;
-        if !edited
-            .iter()
-            .any(|s| s.name == p.save && s.size == selected.size && s.files == selected.files)
-            || !same_saves(&original_destination, &edited, &p.save)
-        {
+        let dest_ok = if target.is_dir() {
+            edited
+                .iter()
+                .any(|s| s.name == p.save && s.size == selected.size && s.files == selected.files)
+        } else {
+            edited
+                .iter()
+                .any(|s| s.name == p.save && s.size == selected.size && s.files == selected.files)
+                && same_saves(&original_destination, &edited, &p.save)
+        };
+        if !dest_ok {
             return Err("A verificação do cartão de destino falhou.".into());
         }
         if saved_payload(db, card, &p.save, &temp.join("verify-source"))?
@@ -268,34 +410,50 @@ pub fn edit(
         }
         destination_stage = Some(stage);
     }
-    delete_staged(db, &source_stage, &p.save, temp)?;
-    if !same_saves(&original, &mc::inspect(&source_stage)?.0, &p.save) {
-        return Err("A cópia de trabalho alterou outros saves.".into());
-    }
     revision(card, &p.revision)?;
     let backup = mc::store(db).join("backups").join(mc::stamp());
     fs::create_dir_all(backup.join("origem")).map_err(e)?;
     let source_backup = backup.join("origem").join(&p.card);
-    mc::copy_tree(card, &source_backup)?;
-    if mc::fingerprint(&source_backup)? != p.revision {
-        return Err("Backup da origem divergente.".into());
+    if card.is_dir() {
+        backup_folder_save(card, &p.save, &source_backup, true)?;
+    } else {
+        mc::copy_tree(card, &source_backup)?;
+        if mc::fingerprint(&source_backup)? != p.revision {
+            return Err("Backup da origem divergente.".into());
+        }
     }
     if let Some(target) = &destination {
         revision(target, &p.target_revision)?;
         fs::create_dir(backup.join("destino")).map_err(e)?;
         let dest_backup = backup.join("destino").join(&p.target);
-        mc::copy_tree(target, &dest_backup)?;
-        if mc::fingerprint(&dest_backup)? != p.target_revision {
-            return Err("Backup do destino divergente.".into());
+        if target.is_dir() {
+            backup_folder_save(target, &p.save, &dest_backup, false)?;
+        } else {
+            mc::copy_tree(target, &dest_backup)?;
+            if mc::fingerprint(&dest_backup)? != p.target_revision {
+                return Err("Backup do destino divergente.".into());
+            }
         }
     }
     let manifest = backup.join("operation.json");
     fs::write(&manifest,serde_json::to_vec_pretty(&serde_json::json!({"action":p.action,"save":p.save,"source":card,"destination":destination,"source_revision":p.revision,"destination_revision":p.target_revision,"state":"prepared"})).map_err(e)?).map_err(e)?;
     let mut swaps = Vec::new();
     if let (Some(target), Some(stage)) = (&destination, &destination_stage) {
-        swaps.push(Swap::prepare(target, stage)?);
+        if target.is_dir() {
+            swaps.push(Swap::prepare_folder_put(
+                target,
+                &p.save,
+                &stage.join(&p.save),
+            )?);
+        } else {
+            swaps.push(Swap::prepare(target, stage)?);
+        }
     }
-    swaps.push(Swap::prepare(card, &source_stage)?);
+    if let Some(stage) = &source_stage {
+        swaps.push(Swap::prepare(card, stage)?);
+    } else {
+        swaps.push(Swap::prepare_folder_delete(card, &p.save)?);
+    }
     revision(card, &p.revision)?;
     if let Some(target) = &destination {
         revision(target, &p.target_revision)?;
@@ -305,7 +463,6 @@ pub fn edit(
     }
     mc::writable()?;
     publish(&mut swaps)?;
-    // Keep a prepared manifest recoverable even when the final status write is denied.
     let _=fs::write(&manifest,serde_json::to_vec_pretty(&serde_json::json!({"action":p.action,"save":p.save,"source":card,"destination":destination,"source_revision":p.revision,"destination_revision":p.target_revision,"state":"committed"})).map_err(e)?);
     Ok(mc::ActionResult {
         message: if move_save {

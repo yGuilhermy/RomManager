@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import ts from "typescript";
-const source = fs.readFileSync(new URL("../src/lib/api.ts", import.meta.url), "utf8");
-const js = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
+import { fileURLToPath } from "node:url";
+import { buildSync } from "esbuild";
+const js = buildSync({ entryPoints: [fileURLToPath(new URL("../src/lib/api.ts", import.meta.url))], bundle: true, format: "esm", target: "es2022", write: false }).outputFiles[0].text;
 const { cachedPcsx2Json, invalidatePcsx2Cache, apiFetch } = await import(`data:text/javascript;base64,${Buffer.from(js).toString("base64")}`);
 
 test("PCSX2 cache deduplicates reads and refreshes after mutation or explicit update", async () => {

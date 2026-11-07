@@ -1,32 +1,38 @@
 import { useEffect, useRef, useState } from "react";
-import { apiJson, cachedPcsx2Json, invalidatePcsx2Cache } from "../lib/api";
+import { apiJson, cachedPcsx2Json, invalidatePcsx2Cache, peekPcsx2Json } from "../lib/api";
 import { resourceQueue } from "../lib/resourceQueue";
+import { subscribe } from "../lib/smartCache";
+import { RESOURCES_PATH, gameStatePath } from "../lib/prefetcher";
 import type { NativeState, ResourceContext, ResourceKind, ResourcePlan } from "../lib/gameResourceTypes";
 
 const snapshots = new Map<string, NativeState>();
+const lastCrc = new Map<string, string>();
 type Pending = Record<string,"queued"|"saving">;
 export function useGameResources(gameId:string, serial:string|null, kind:ResourceKind) {
-  const [context,setContext]=useState<ResourceContext|null>(null);
-  const [native,setNative]=useState<NativeState|null>(null);
-  const [crc,setCrc]=useState("");
+  const initialCrc=lastCrc.get(gameId)||"";
+  const [context,setContext]=useState<ResourceContext|null>(()=>peekPcsx2Json<ResourceContext>(RESOURCES_PATH)??null);
+  const [native,setNative]=useState<NativeState|null>(()=>snapshots.get(`${gameId}|${initialCrc}`)??null);
+  const [crc,setCrc]=useState(initialCrc);
   const [reading,setReading]=useState(false);
   const [pending,setPending]=useState<Pending>({});
   const [errors,setErrors]=useState<Record<string,string>>({});
   const [notice,setNotice]=useState("");
-  const mounted=useRef(true),contextRef=useRef<ResourceContext|null>(null);
+  const mounted=useRef(true),contextRef=useRef<ResourceContext|null>(context);
+  const crcRef=useRef(crc);crcRef.current=crc;
   const owner=useRef({});
   const nativeRequired=kind!=="covers"&&kind!=="saves";
   const remember=(data:NativeState)=>{
     snapshots.set(`${gameId}|${data.crc}`,data);
+    if(data.crc)lastCrc.set(gameId,data.crc);
     if(snapshots.size>32)snapshots.delete(snapshots.keys().next().value!);
-    if(mounted.current){setNative(data);if(!crc&&data.crc)setCrc(data.crc);}
+    if(mounted.current){setNative(data);if(!crcRef.current&&data.crc)setCrc(data.crc);}
   };
   const clearError=(key:string)=>setErrors(old=>{const next={...old};delete next[key];return next;});
   const read=async(force=false)=>{
-    if(force)invalidatePcsx2Cache();
-    const data=await cachedPcsx2Json<ResourceContext>("/api/pcsx2/resources");
+    if(force)invalidatePcsx2Cache("/api/pcsx2/resources");
+    const data=await cachedPcsx2Json<ResourceContext>(RESOURCES_PATH);
     contextRef.current=data;if(mounted.current)setContext(data);
-    if(serial)remember(await cachedPcsx2Json<NativeState>(`/api/pcsx2/resources/game?game_id=${encodeURIComponent(gameId)}&crc=${encodeURIComponent(crc)}`));
+    if(serial)remember(await cachedPcsx2Json<NativeState>(gameStatePath(gameId,crcRef.current)));
     return data;
   };
   const refresh=async(force=true)=>{
@@ -43,7 +49,12 @@ export function useGameResources(gameId:string, serial:string|null, kind:Resourc
       if(detail?.gameId===gameId&&detail?.owner!==owner.current&&nativeRequired)void refresh(true);
     };
     window.addEventListener("rommanager:resources-changed",changed);
-    return()=>{mounted.current=false;window.removeEventListener("rommanager:resources-changed",changed);};
+    const stop=subscribe(key=>{
+      if(!mounted.current)return;
+      if(key===RESOURCES_PATH){const next=peekPcsx2Json<ResourceContext>(key);if(next){contextRef.current=next;setContext(next);}}
+      else if(key===gameStatePath(gameId,crcRef.current)){const next=peekPcsx2Json<NativeState>(key);if(next)remember(next);}
+    });
+    return()=>{mounted.current=false;stop();window.removeEventListener("rommanager:resources-changed",changed);};
   },[gameId]);
   const run=async<T,>(key:string,operation:()=>Promise<T>):Promise<T|undefined>=>{
     if(pending[key])return;

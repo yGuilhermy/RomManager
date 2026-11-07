@@ -1,3 +1,5 @@
+import { invalidate, loadCached, peek, prefetch } from "./smartCache";
+
 export const API = "http://127.0.0.1:3000";
 
 export class ApiError extends Error {
@@ -19,7 +21,7 @@ export async function apiFetch(path: string, options?: RequestInit): Promise<Res
                 try { const data = JSON.parse(body); message = data.error || data.message || message; } catch {}
                 throw new ApiError(response.status, message);
             }
-            if (method !== "GET" && (path.includes("/api/pcsx2/") || path.includes("/api/config"))) invalidatePcsx2Cache();
+            if (method !== "GET" && (path.includes("/api/pcsx2/") || path.includes("/api/config"))) invalidatePcsx2Cache(path.includes("/api/pcsx2/") ? mutationScope(path.slice(path.indexOf("/api/pcsx2/"))) : undefined);
             return response;
         } catch (error) {
             if (options?.signal?.aborted) throw error;
@@ -44,14 +46,19 @@ export async function apiJson<T = unknown>(path: string, options?: RequestInit):
     return data as T;
 }
 
-const pcsx2Reads = new Map<string, Promise<unknown>>();
-export function invalidatePcsx2Cache() { pcsx2Reads.clear(); }
+export function invalidatePcsx2Cache(prefix?: string) { invalidate(prefix); }
 export function cachedPcsx2Json<T>(path: string): Promise<T> {
     if (path.includes("refresh=true")) invalidatePcsx2Cache();
-    let request = pcsx2Reads.get(path);
-    if (!request) {
-        request = apiJson<T>(path).catch(error => { if (pcsx2Reads.get(path) === request) pcsx2Reads.delete(path); throw error; });
-        pcsx2Reads.set(path, request);
-    }
-    return request as Promise<T>;
+    return loadCached<T>(path, () => apiJson<T>(path));
+}
+export function peekPcsx2Json<T>(path: string): T | undefined { return peek<T>(path); }
+export function prefetchPcsx2Json(path: string) { prefetch(path, () => apiJson(path)); }
+
+export function mutationScope(path: string): string | undefined {
+    if (path.startsWith("/api/pcsx2/memory-cards")) return "/api/pcsx2/memory-cards";
+    if (path.startsWith("/api/pcsx2/resources")) return "/api/pcsx2/resources";
+    if (path.startsWith("/api/pcsx2/bios")) return "/api/pcsx2/bios";
+    if (path.startsWith("/api/pcsx2/covers")) return "/api/pcsx2/resources";
+    if (path.startsWith("/api/pcsx2/achievements")) return "/api/pcsx2/achievements";
+    return undefined;
 }

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { cachedPcsx2Json, invalidatePcsx2Cache, apiFetch } from "../lib/api";
 import { BiosInfo } from "../types";
+import { BrowsePathButton } from "./BrowsePathButton";
 
 interface BiosPageProps {
     onShowToast: (message: string, type?: "success" | "error" | "info") => void;
@@ -116,6 +117,7 @@ export function BiosPage({ onShowToast }: BiosPageProps) {
                         placeholder="Ex: C:\MeusArquivos\bios_pack.zip ou SCPH-39001.bin"
                         aria-label="Caminho do arquivo de BIOS"
                     />
+                    <BrowsePathButton title="Selecionar arquivo de BIOS ou ZIP" current={importPath} disabled={isImporting} onSelect={setImportPath} />
                     <button
                         type="submit"
                         disabled={isImporting}
@@ -162,7 +164,7 @@ export function BiosPage({ onShowToast }: BiosPageProps) {
                                         )}
                                     </div>
                                     <div className="bios-card-meta">
-                                        Arquivo: <code>{bios.filename}</code> • Tamanho: {(bios.size / (1024 * 1024)).toFixed(2)} MB
+                                        Arquivo: <code>{bios.filename}</code>
                                     </div>
 
                                 </div>

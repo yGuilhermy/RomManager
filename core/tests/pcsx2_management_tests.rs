@@ -1,12 +1,6 @@
-use rom_core::database::{get_config, initialize_db};
+use rom_core::database::{initialize_db};
 use rom_core::exe_runner::{launch_pcsx2_with_args, validate_pcsx2_executable};
-use rom_core::pcsx2::{
-    compute_sha1, detect_installations, export_covers_to_pcsx2, extract_pcsx2_version,
-    get_active_profile, identify_bios, import_bios_archive, import_bios_file, inspect_installation,
-    install_or_update_managed_pcsx2, list_official_releases, list_profiles, parse_scph_model,
-    run_diagnostic, sanitize_path, save_profile, scan_bios_directory, set_active_profile,
-    Pcsx2Profile,
-};
+use rom_core::pcsx2::{compute_sha1, detect_installations, export_covers_to_pcsx2, extract_pcsx2_version, identify_bios, import_bios_archive, import_bios_file, inspect_installation, parse_scph_model, run_diagnostic, sanitize_path, scan_bios_directory};
 use std::fs;
 use std::path::Path;
 
@@ -16,10 +10,7 @@ fn sha1_calculation_matches_known_test_vectors() {
     assert_eq!(empty_sha1, "da39a3ee5e6b4b0d3255bfef95601890afd80709");
 
     let quick_brown_fox = compute_sha1(b"The quick brown fox jumps over the lazy dog");
-    assert_eq!(
-        quick_brown_fox,
-        "2fd4e1c67a2d28fced849ee1bb76e7391b93eb12"
-    );
+    assert_eq!(quick_brown_fox, "2fd4e1c67a2d28fced849ee1bb76e7391b93eb12");
 }
 
 #[tokio::test]
@@ -49,7 +40,11 @@ async fn pcsx2_installation_detection_and_portable_mode() {
     );
 
     let detected = detect_installations(Some(&exe_path.to_string_lossy()), Some(test_dir));
-    assert!(detected.iter().any(|i| i.path == exe_path.to_string_lossy()));
+    assert!(
+        detected
+            .iter()
+            .any(|i| i.path == exe_path.to_string_lossy())
+    );
 
     let invalid_path = test_dir.join("nonexistent_pcsx2.exe");
     let err = inspect_installation(&invalid_path);
@@ -84,7 +79,10 @@ async fn bios_scanning_identification_and_duplicate_detection() {
     let scanned = scan_bios_directory(&bios_dir, Some(&bios_file1.to_string_lossy()));
     assert_eq!(scanned.len(), 3);
 
-    let usa1 = scanned.iter().find(|b| b.filename == "SCPH-39001_USA_v01.60.bin").unwrap();
+    let usa1 = scanned
+        .iter()
+        .find(|b| b.filename == "SCPH-39001_USA_v01.60.bin")
+        .unwrap();
     assert_eq!(usa1.region, "USA / NTSC-U");
     assert_eq!(usa1.model, "SCPH-39001");
     assert_eq!(usa1.version, "v01.60");
@@ -92,12 +90,18 @@ async fn bios_scanning_identification_and_duplicate_detection() {
     assert!(usa1.is_active);
     assert!(usa1.is_duplicate);
 
-    let usa_dup = scanned.iter().find(|b| b.filename == "ps2-usa-copy.bin").unwrap();
+    let usa_dup = scanned
+        .iter()
+        .find(|b| b.filename == "ps2-usa-copy.bin")
+        .unwrap();
     assert_eq!(usa_dup.sha1, usa1.sha1);
     assert!(usa_dup.is_duplicate);
     assert!(!usa_dup.is_active);
 
-    let eu = scanned.iter().find(|b| b.filename == "SCPH-70004_EUR_v02.00.bin").unwrap();
+    let eu = scanned
+        .iter()
+        .find(|b| b.filename == "SCPH-70004_EUR_v02.00.bin")
+        .unwrap();
     assert_eq!(eu.region, "Europe / PAL");
     assert_eq!(eu.model, "SCPH-70004");
     assert_eq!(eu.version, "v02.00");
@@ -143,128 +147,6 @@ async fn bios_import_validates_size_and_prevents_duplicate_content() {
     let err_dup = import_bios_file(&bios_dir, &user_bios_rename);
     assert!(err_dup.is_err());
     assert!(err_dup.unwrap_err().contains("BIOS duplicada"));
-}
-
-#[tokio::test]
-async fn pcsx2_profiles_lifecycle_and_active_switching() {
-    let test_dir = Path::new("target/test_pcsx2_profiles");
-    if test_dir.exists() {
-        let _ = fs::remove_dir_all(test_dir);
-    }
-    fs::create_dir_all(test_dir).expect("Create test dir");
-    let db_path = test_dir.join("test.db");
-    let mut conn = initialize_db(&db_path).expect("Init db");
-
-    let initial_profiles = list_profiles(&conn).expect("List profiles");
-    assert_eq!(initial_profiles.len(), 1);
-    assert!(initial_profiles[0].is_active);
-    assert_eq!(initial_profiles[0].id, "default");
-
-    let active = get_active_profile(&conn).expect("Get active");
-    assert_eq!(active.id, "default");
-
-    let new_profile = Pcsx2Profile {
-        id: "profile_nightly".to_string(),
-        name: "PCSX2 Nightly Vulkan".to_string(),
-        executable_path: "C:\\Emulators\\PCSX2-Nightly\\pcsx2-qt.exe".to_string(),
-        data_dir: "C:\\Emulators\\PCSX2-Nightly".to_string(),
-        bios_path: Some("C:\\Emulators\\PCSX2-Nightly\\bios\\scph39001.bin".to_string()),
-        renderer: "Vulkan".to_string(),
-        aspect_ratio: "16:9".to_string(),
-        fullscreen: true,
-        is_active: true,
-        created_at: "2026-11-05T00:00:00Z".to_string(),
-        updated_at: "2026-11-05T00:00:00Z".to_string(),
-    };
-
-    save_profile(&mut conn, &new_profile).expect("Save profile");
-
-    let updated_profiles = list_profiles(&conn).expect("List updated");
-    assert_eq!(updated_profiles.len(), 2);
-
-    let current_active = get_active_profile(&conn).expect("Get new active");
-    assert_eq!(current_active.id, "profile_nightly");
-    assert_eq!(current_active.renderer, "Vulkan");
-    assert!(current_active.fullscreen);
-
-    let default_prof = updated_profiles.iter().find(|p| p.id == "default").unwrap();
-    assert!(!default_prof.is_active);
-
-    set_active_profile(&mut conn, "default").expect("Switch back to default");
-    let restored_active = get_active_profile(&conn).expect("Restored active");
-    assert_eq!(restored_active.id, "default");
-
-    assert_eq!(
-        get_config(&conn, "pcsx2_path").unwrap(),
-        "C:\\Program Files\\PCSX2\\pcsx2-qt.exe"
-    );
-
-    let delete_err = rom_core::pcsx2::delete_profile(&mut conn, "default");
-    assert!(delete_err.is_err());
-
-    rom_core::pcsx2::delete_profile(&mut conn, "profile_nightly").expect("Delete inactive profile");
-    let final_profiles = list_profiles(&conn).expect("List final");
-    assert_eq!(final_profiles.len(), 1);
-}
-
-#[tokio::test]
-async fn managed_install_update_and_atomic_rollback_on_failure() {
-    let test_dir = Path::new("target/test_pcsx2_managed");
-    if test_dir.exists() {
-        let _ = fs::remove_dir_all(test_dir);
-    }
-    fs::create_dir_all(test_dir).expect("Create test dir");
-
-    let managed_dir = test_dir.join("managed_pcsx2");
-
-    let releases = list_official_releases(&managed_dir);
-    assert!(releases.is_empty(), "Não inventar releases quando não há catálogo em cache");
-
-    let inst_v200 = install_or_update_managed_pcsx2(
-        &managed_dir,
-        "2.0.0",
-        Some(b"MZ_PCSX2_VERSION_2_0_0"),
-        false,
-    )
-    .expect("Install v2.0.0");
-    assert!(inst_v200.is_managed);
-    assert!(managed_dir.join("version.json").exists());
-    assert_eq!(
-        fs::read(managed_dir.join("pcsx2-qt.exe")).unwrap(),
-        b"MZ_PCSX2_VERSION_2_0_0"
-    );
-
-    let fail_result = install_or_update_managed_pcsx2(
-        &managed_dir,
-        "2.2.0",
-        Some(b"MZ_CORRUPTED_PAYLOAD"),
-        true,
-    );
-    assert!(fail_result.is_err());
-    let err_msg = fail_result.unwrap_err();
-    assert!(err_msg.contains("restaurada com sucesso"));
-
-    assert_eq!(
-        fs::read(managed_dir.join("pcsx2-qt.exe")).unwrap(),
-        b"MZ_PCSX2_VERSION_2_0_0"
-    );
-    let v_content = fs::read_to_string(managed_dir.join("version.json")).unwrap();
-    assert!(v_content.contains("2.0.0"));
-
-    let inst_v220 = install_or_update_managed_pcsx2(
-        &managed_dir,
-        "2.2.0",
-        Some(b"MZ_PCSX2_VERSION_2_2_0"),
-        false,
-    )
-    .expect("Update to v2.2.0");
-    assert_eq!(
-        fs::read(managed_dir.join("pcsx2-qt.exe")).unwrap(),
-        b"MZ_PCSX2_VERSION_2_2_0"
-    );
-    let v220_content = fs::read_to_string(managed_dir.join("version.json")).unwrap();
-    assert!(v220_content.contains("2.2.0"));
-    assert_eq!(inst_v220.version, "v2.2.0");
 }
 
 #[tokio::test]
@@ -314,14 +196,12 @@ async fn covers_export_to_pcsx2_directory_maps_serials_and_preserves_custom_cove
 
     let target_cover = pcsx2_covers_dir.join("SCUS-97328.jpg");
     assert!(target_cover.exists());
-    assert_eq!(
-        fs::read(&target_cover).unwrap(),
-        b"JPEG_COVER_CONTENT"
-    );
+    assert_eq!(fs::read(&target_cover).unwrap(), b"JPEG_COVER_CONTENT");
 
     fs::write(&target_cover, b"USER_CUSTOM_HIGH_RES_ART").expect("User custom cover");
 
-    let result_preserved = export_covers_to_pcsx2(&conn, &pcsx2_covers_dir, false).expect("Export without overwrite");
+    let result_preserved =
+        export_covers_to_pcsx2(&conn, &pcsx2_covers_dir, false).expect("Export without overwrite");
     assert_eq!(result_preserved.preserved, 1);
     assert_eq!(result_preserved.exported, 0);
     assert_eq!(
@@ -329,12 +209,10 @@ async fn covers_export_to_pcsx2_directory_maps_serials_and_preserves_custom_cove
         b"USER_CUSTOM_HIGH_RES_ART"
     );
 
-    let result_overwrite = export_covers_to_pcsx2(&conn, &pcsx2_covers_dir, true).expect("Export with overwrite");
+    let result_overwrite =
+        export_covers_to_pcsx2(&conn, &pcsx2_covers_dir, true).expect("Export with overwrite");
     assert_eq!(result_overwrite.exported, 1);
-    assert_eq!(
-        fs::read(&target_cover).unwrap(),
-        b"JPEG_COVER_CONTENT"
-    );
+    assert_eq!(fs::read(&target_cover).unwrap(), b"JPEG_COVER_CONTENT");
 }
 
 #[tokio::test]
@@ -350,10 +228,6 @@ async fn diagnostic_reports_errors_for_missing_paths_and_alerts_when_pcsx2_missi
 
     let _ = conn.execute(
         "UPDATE configs SET value = 'C:\\NonexistentFolder\\pcsx2.exe' WHERE key IN ('pcsx2_path', 'pcsx2_executable_path')",
-        [],
-    );
-    let _ = conn.execute(
-        "UPDATE pcsx2_profiles SET executable_path = 'C:\\NonexistentFolder\\pcsx2.exe' WHERE id = 'default'",
         [],
     );
 
@@ -381,49 +255,13 @@ async fn generic_scph_identification_and_corrupted_fallback() {
     assert_eq!(r2, "USA / NTSC-U");
     assert_eq!(v2, "v02.00");
 
-    let (mf, rf, vf) = identify_bios("corrupted_dump.bin", "0000000000000000000000000000000000000000");
+    let (mf, rf, vf) = identify_bios(
+        "corrupted_dump.bin",
+        "0000000000000000000000000000000000000000",
+    );
     assert_eq!(mf, "PlayStation 2 BIOS");
     assert_eq!(rf, "Global / Outro");
     assert_eq!(vf, "v01.xx");
-}
-
-#[tokio::test]
-async fn diagnostic_respects_custom_data_dir_and_bios_dir() {
-    let test_dir = Path::new("target/test_pcsx2_diag_custom");
-    if test_dir.exists() {
-        let _ = fs::remove_dir_all(test_dir);
-    }
-    fs::create_dir_all(test_dir).expect("Create test dir");
-
-    let db_path = test_dir.join("diag_custom.db");
-    let mut conn = initialize_db(&db_path).expect("Init db");
-
-    let custom_data = test_dir.join("custom_data");
-    let custom_bios = test_dir.join("custom_bios_folder");
-    fs::create_dir_all(&custom_data).expect("Create custom data");
-    fs::create_dir_all(&custom_bios).expect("Create custom bios");
-
-    let dummy_bios = custom_bios.join("SCPH-39001.bin");
-    fs::write(&dummy_bios, vec![0u8; 4 * 1024 * 1024]).expect("Write bios");
-
-    let dummy_exe = test_dir.join("pcsx2-qt.exe");
-    fs::write(&dummy_exe, b"MZ_DUMMY_EXE").expect("Write exe");
-
-    let mut prof = get_active_profile(&conn).expect("Get active");
-    prof.executable_path = dummy_exe.to_string_lossy().to_string();
-    prof.data_dir = custom_data.to_string_lossy().to_string();
-    save_profile(&mut conn, &prof).expect("Save profile");
-
-    let _ = conn.execute(
-        "UPDATE configs SET value = ?1 WHERE key = 'pcsx2_bios_dir'",
-        rusqlite::params![custom_bios.to_string_lossy().to_string()],
-    );
-
-    let diag = run_diagnostic(&conn).expect("Run diagnostic");
-    assert!(diag.executable_valid);
-    assert!(diag.data_dir_valid);
-    assert!(diag.bios_dir_valid);
-    assert_eq!(diag.bios_count, 1);
 }
 
 #[tokio::test]
@@ -441,7 +279,11 @@ async fn launch_pcsx2_validates_and_handles_missing_files() {
 
     let err_invalid_exe = launch_pcsx2_with_args(&fake_exe, &fake_rom, true);
     assert!(err_invalid_exe.is_err());
-    assert!(err_invalid_exe.unwrap_err().contains("não foi encontrado ou é inválido"));
+    assert!(
+        err_invalid_exe
+            .unwrap_err()
+            .contains("não foi encontrado ou é inválido")
+    );
     assert!(!validate_pcsx2_executable(&fake_exe));
 
     let valid_exe_path = test_dir.join("pcsx2-qt.exe");
@@ -468,8 +310,8 @@ async fn version_detection_extracts_real_pe_or_reports_unknown() {
 
     let mut pe_mock_bytes = vec![0u8; 1024];
     let tag = [
-        b'P', 0, b'r', 0, b'o', 0, b'd', 0, b'u', 0, b'c', 0, b't', 0, b'V', 0, b'e', 0, b'r',
-        0, b's', 0, b'i', 0, b'o', 0, b'n', 0,
+        b'P', 0, b'r', 0, b'o', 0, b'd', 0, b'u', 0, b'c', 0, b't', 0, b'V', 0, b'e', 0, b'r', 0,
+        b's', 0, b'i', 0, b'o', 0, b'n', 0,
     ];
     pe_mock_bytes[100..100 + tag.len()].copy_from_slice(&tag);
     let ver_bytes = [
@@ -503,51 +345,6 @@ async fn bios_import_rejects_invalid_file_extensions() {
     let err = import_bios_file(&bios_dir, &invalid_script);
     assert!(err.is_err());
     assert!(err.unwrap_err().contains("Extensão inválida"));
-}
-
-#[tokio::test]
-async fn profile_validation_rejects_empty_name_or_empty_executable() {
-    let test_dir = Path::new("target/test_pcsx2_profile_val");
-    if test_dir.exists() {
-        let _ = fs::remove_dir_all(test_dir);
-    }
-    fs::create_dir_all(test_dir).expect("Create test dir");
-    let db_path = test_dir.join("profiles_val.db");
-    let mut conn = initialize_db(&db_path).expect("Init db");
-
-    let invalid_empty_name = Pcsx2Profile {
-        id: "prof_empty_name".to_string(),
-        name: "   ".to_string(),
-        executable_path: "C:\\Program Files\\PCSX2\\pcsx2-qt.exe".to_string(),
-        data_dir: "".to_string(),
-        bios_path: None,
-        renderer: "Vulkan".to_string(),
-        aspect_ratio: "16:9".to_string(),
-        fullscreen: false,
-        is_active: false,
-        created_at: "2026-11-05T00:00:00Z".to_string(),
-        updated_at: "2026-11-05T00:00:00Z".to_string(),
-    };
-    let err_name = save_profile(&mut conn, &invalid_empty_name);
-    assert!(err_name.is_err());
-    assert!(err_name.unwrap_err().contains("nome do perfil não pode ser vazio"));
-
-    let invalid_empty_exe = Pcsx2Profile {
-        id: "prof_empty_exe".to_string(),
-        name: "Valid Name".to_string(),
-        executable_path: "   ".to_string(),
-        data_dir: "".to_string(),
-        bios_path: None,
-        renderer: "Vulkan".to_string(),
-        aspect_ratio: "16:9".to_string(),
-        fullscreen: false,
-        is_active: false,
-        created_at: "2026-11-05T00:00:00Z".to_string(),
-        updated_at: "2026-11-05T00:00:00Z".to_string(),
-    };
-    let err_exe = save_profile(&mut conn, &invalid_empty_exe);
-    assert!(err_exe.is_err());
-    assert!(err_exe.unwrap_err().contains("caminho do executável do PCSX2 não pode ser vazio"));
 }
 
 #[tokio::test]
@@ -625,20 +422,29 @@ async fn zip_with_multiple_bios_files_is_inspected_and_imported_reporting_count(
     let zip_file_path = staging_dir.join("ps2_bios_pack.zip");
     let zip_file = fs::File::create(&zip_file_path).expect("Create zip file");
     let mut zip_writer = zip::ZipWriter::new(zip_file);
-    let options = zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let options =
+        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
 
     let mut bios1_data = vec![0u8; 4 * 1024 * 1024];
     bios1_data[0..14].copy_from_slice(b"ZIP_BIOS_USA_1");
-    zip_writer.start_file("SCPH-39001.bin", options).expect("Start file 1");
+    zip_writer
+        .start_file("SCPH-39001.bin", options)
+        .expect("Start file 1");
     zip_writer.write_all(&bios1_data).expect("Write file 1");
 
     let mut bios2_data = vec![0u8; 4 * 1024 * 1024];
     bios2_data[0..14].copy_from_slice(b"ZIP_BIOS_EUR_2");
-    zip_writer.start_file("SCPH-70004.bin", options).expect("Start file 2");
+    zip_writer
+        .start_file("SCPH-70004.bin", options)
+        .expect("Start file 2");
     zip_writer.write_all(&bios2_data).expect("Write file 2");
 
-    zip_writer.start_file("readme.txt", options).expect("Start readme");
-    zip_writer.write_all(b"PS2 Bios instructions").expect("Write readme");
+    zip_writer
+        .start_file("readme.txt", options)
+        .expect("Start readme");
+    zip_writer
+        .write_all(b"PS2 Bios instructions")
+        .expect("Write readme");
 
     zip_writer.finish().expect("Finish zip");
 
@@ -665,15 +471,21 @@ async fn zip_without_valid_bios_files_is_rejected() {
     let zip_file_path = test_dir.join("not_bios.zip");
     let zip_file = fs::File::create(&zip_file_path).expect("Create zip file");
     let mut zip_writer = zip::ZipWriter::new(zip_file);
-    let options = zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let options =
+        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
 
-    zip_writer.start_file("document.txt", options).expect("Start doc");
+    zip_writer
+        .start_file("document.txt", options)
+        .expect("Start doc");
     zip_writer.write_all(b"Not a bios dump").expect("Write doc");
     zip_writer.finish().expect("Finish zip");
 
     let err = import_bios_archive(&bios_dir, &zip_file_path);
     assert!(err.is_err());
-    assert!(err.unwrap_err().contains("não contém nenhum arquivo de BIOS"));
+    assert!(
+        err.unwrap_err()
+            .contains("não contém nenhum arquivo de BIOS")
+    );
 }
 
 #[tokio::test]
@@ -702,37 +514,4 @@ async fn active_bios_is_sorted_at_top_of_list() {
     assert_eq!(scanned[0].filename, "SCPH-90006.bin");
     assert!(scanned[0].is_active);
     assert!(!scanned[1].is_active);
-}
-
-#[tokio::test]
-async fn official_releases_list_includes_stable_and_nightly() {
-    let test_dir = Path::new("target/test_pcsx2_releases_channels");
-    if test_dir.exists() {
-        let _ = fs::remove_dir_all(test_dir);
-    }
-    fs::create_dir_all(test_dir).expect("Create test dir");
-    let managed_dir = test_dir.join("managed");
-
-    fs::create_dir_all(&managed_dir).unwrap();
-    let fixture = serde_json::json!([
-        {"version":"2.2.0","release_name":"PCSX2 Estável","channel":"stable","published_at":"2024-11-01","download_url":"https://github.com/PCSX2/pcsx2/releases/download/v2.2.0/test.7z","file_size":100,"installed":false,"executable_path":null,"data_dir":null},
-        {"version":"2.3.0-nightly","release_name":"PCSX2 Nightly","channel":"nightly","published_at":"2024-11-02","download_url":"https://github.com/PCSX2/pcsx2/releases/download/v2.3.0/test.7z","file_size":100,"installed":false,"executable_path":null,"data_dir":null}
-    ]);
-    fs::write(managed_dir.join("releases_cache_v2.json"), fixture.to_string()).unwrap();
-    let releases = list_official_releases(&managed_dir);
-    let stable = releases.iter().find(|r| r.version == "2.2.0").expect("Stable 2.2.0 exists");
-    assert_eq!(stable.channel, "stable");
-    assert!(stable.release_name.contains("Estável"));
-
-    let nightly = releases.iter().find(|r| r.version == "2.3.0-nightly").expect("Nightly exists");
-    assert_eq!(nightly.channel, "nightly");
-    assert!(nightly.release_name.contains("Nightly"));
-}
-
-
-#[tokio::test]
-async fn release_tag_rejects_paths_before_network_access() {
-    for tag in ["", "../v2.2.0", "v2.2.0?x=1", "https://example.com"] {
-        assert!(rom_core::pcsx2::find_official_release(Path::new("unused"), tag).await.is_err());
-    }
 }

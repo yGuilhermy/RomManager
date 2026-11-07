@@ -3,6 +3,7 @@ tasks/
 scripts/
 docs/
 tests/
+__pycache__/
 !core/tests/
 !apps/desktop/tests/
 core/target/

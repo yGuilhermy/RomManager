@@ -1,3 +1,6 @@
+import { MemoryCardToolCard } from "./MemoryCardToolCard";
+import { BrowsePathButton } from "./BrowsePathButton";
+import { apiFetch } from "../lib/api";
 import { useState } from "react";
 import type { ValidationResult,CoverJob } from "../types";
 interface Props {
@@ -9,9 +12,17 @@ interface Props {
 }
 export function SettingsPage(props:Props) {
     const [savingPreference,setSavingPreference]=useState(false);
+    const [nativeValidation,setNativeValidation]=useState<ValidationResult|null>(null);
+    const saveDataDirectory=async()=>{
+        try {
+            await apiFetch("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:"pcsx2_data_dir",value:(props.configs.pcsx2_data_dir||"").trim().replace(/^["']|["']$/g,"")})});
+            setNativeValidation({valid:true,message:"Pasta de dados atualizada."});
+        } catch(e) {setNativeValidation({valid:false,message:e instanceof Error ? e.message : "Não foi possível alterar a pasta."});}
+    };
     const fields=[
         {key:"roms_directory",label:"Pasta de ROMs",hint:"Diretório usado para sincronizar a biblioteca e instalar downloads.",placeholder:"D:\\Jogos\\PS2",save:props.onSaveRoms,validation:props.validations[0]},
         {key:"pcsx2_executable_path",label:"Executável do PCSX2",hint:"Selecione o caminho completo de pcsx2-qt.exe ou pcsx2.exe.",placeholder:"C:\\Program Files\\PCSX2\\pcsx2-qt.exe",save:props.onSaveEmulator,validation:props.validations[1]},
+        {key:"pcsx2_data_dir",label:"Pasta de dados do PCSX2",hint:"Opcional. Use a pasta existente com inis, bios e memorycards. Em branco usa a localização nativa.",placeholder:"Detectar pela instalação",save:saveDataDirectory,validation:nativeValidation},
         {key:"covers_directory",label:"Pasta de capas",hint:"Imagens pessoais são preservadas durante a regeneração.",placeholder:"D:\\Jogos\\PS2\\covers",save:props.onSaveCovers,validation:props.validations[2]},
     ];
     return <div className="settings-page-v2">
@@ -21,12 +32,14 @@ export function SettingsPage(props:Props) {
                 <label htmlFor={`settings-${field.key}`}>{field.label}</label><p id={`hint-${field.key}`} className="field-hint">{field.hint}</p>
                 <div className="settings-path-input"><input id={`settings-${field.key}`} aria-describedby={`hint-${field.key}`} value={props.configs[field.key] || ""} placeholder={field.placeholder}
                     disabled={props.busy || field.key === "covers_directory" && !!props.covers?.running} onChange={event=>props.onChange(field.key,event.target.value)} />
+                    <BrowsePathButton title={`Selecionar ${field.label.toLowerCase()}`} directory={field.key!=="pcsx2_executable_path"} extensions={field.key==="pcsx2_executable_path"?["exe"]:undefined} current={props.configs[field.key]} disabled={props.busy || field.key === "covers_directory" && !!props.covers?.running} onSelect={path=>props.onChange(field.key,path)} />
                     <button type="button" className="button-secondary" disabled={props.busy} onClick={()=>void field.save()}>Salvar e validar</button>
                     {field.key!=="pcsx2_executable_path" && <button type="button" className="button-quiet" disabled={!props.configs[field.key]} onClick={()=>void props.onOpenFolder(props.configs[field.key])}>Abrir pasta</button>}
                 </div>
                 {field.validation && <p className={`field-validation ${field.validation.valid?"valid":"invalid"}`} role="status">{field.validation.valid?"✓":"!"} {field.validation.message}</p>}
             </div>)}
         </section>
+        <MemoryCardToolCard />
         <section className="panel"><h3>Fila e downloads em lote</h3>
             <div className="settings-field">
                 <label htmlFor="settings-max-concurrent">Downloads ativos simultâneos</label>

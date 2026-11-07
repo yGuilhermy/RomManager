@@ -40,13 +40,23 @@ O PCSX2 precisa estar instalado e configurado separadamente. O RomManager não i
 
 - **Biblioteca local:** indexação de ROMs nos formatos CHD, ISO, CSO, BIN e GZ, com busca, ordenação, filtros de região e formato e visualização em grade ou lista.
 - **Catálogo PS2:** catálogo local com 4.427 entradas, pesquisa por título, índice alfabético, paginação e ordenação por popularidade, nome ou tamanho, conforme a tela.
-- **Integração com PCSX2:** inicialização de jogos instalados e acesso à pasta do arquivo pelo aplicativo.
+- **Integração com PCSX2:** administração da instalação do usuário, com executável e pasta de dados em Configurações. Leitura das pastas nativas, BIOS e cartões existentes, sem perfis de emulação ou instalador de versões.
+- **Recursos na biblioteca:** abra um jogo instalado para administrar capas, saves, cheats, patches e texturas. Patches incluídos no PCSX2 e cheats nomeados têm ativação individual; o CRC é preenchido quando os recursos identificam uma única revisão.
+- **Memory cards:** cartões em arquivo ou pasta, backup, restauração, exclusão de saves e movimentação entre os dois tipos de cartão, com verificação e confirmação de substituições. Os saves mostram nomes de jogos quando identificáveis. myMCpp pode ser instalado ou removido em Configurações; o card de instalação pode ser ocultado após instalar.
 - **Regeneração de capas:** reassociação de imagens locais e nova busca das capas automáticas geradas pelo RomManager, com progresso e preservação de imagens pessoais.
 - **Capas e informações:** associação de imagens locais, busca de capas por serial ou título, descrições da Wikipédia e consulta à base de compatibilidade incluída no projeto.
 - **Downloads e fila inteligente:** acompanhamento de progresso e velocidade, cancelamento durante a transferência, extração de ZIP, 7z e RAR, suporte a download em lote com modo de seleção múltipla, retenção entre páginas, barra de cálculo de tamanho e limite configurável de 1 a 5 downloads simultâneos na fila.
 - **Perfil e coleção:** foto de avatar personalizada persistida localmente, favoritos com busca e remoção, estatísticas em tempo real da biblioteca (espaço total ocupado, média por jogo e regiões ativas) e histórico de ações locais.
 - **Backup do perfil:** exportação e importação em JSON com prévia, validação e mesclagem transacional. Os identificadores de jogos podem conter caminhos locais; ROMs e imagens não são incluídas.
 - **Pesquisa de traduções:** consulta adicional ao CDRomance, limitada a seis títulos por busca. A disponibilidade depende do serviço externo.
+
+### Roadmap do emulador
+
+- **A5 — Conquistas e aceitação:** integração de consulta com RetroAchievements e validação final do núcleo do emulador. Pendente.
+- **A6 — Catálogo e recursos online:** planejada. Atualizar os dados do catálogo pelo aplicativo e consultar Saves, Cheats, Patches e Texturas na página de cada jogo. Uma ação baixará e aplicará o recurso compatível, com origem, validação, backup e reversão. Saves perguntarão o memory card de destino, avisando sobre falta de espaço ou save existente. Cheats/patches respeitarão região, revisão, CRC e Hardcore; packs de texturas terão estrutura e versão verificadas.
+- **Console / OPL:** depois dos aceites A5/T39 e A6/T43 e das demais dependências técnicas.
+
+A busca e instalação online de recursos da A6 ainda não estão disponíveis. Hoje a administração usa arquivos locais. O plano e as tarefas ficam em `tasks/plan.md` e `tasks/todo.md` no workspace de desenvolvimento.
 
 ### Cuidados com os arquivos
 
@@ -120,6 +130,9 @@ A API atende em `127.0.0.1:3000`, com origens restritas ao desktop. A porta 3000
 
 Use ROMs, BIOS e outros arquivos que você tenha direito de utilizar. Os projetos e serviços citados mantêm suas próprias licenças e condições de uso.
 
+
+A revisão das abas de recursos e seus testes está descrita em [Recursos do jogo: UX](docs/RESOURCE_UX.md).
+Os seletores de arquivos, pastas e exportações estão descritos em [Diálogos nativos](docs/NATIVE_FILE_DIALOGS.md).
 
 ## Licença
 

@@ -28,3 +28,5 @@ sevenz-rust = "0.5.1"
 unrar = "0.5.4"
 chrono = { version = "0.4", features = ["serde"] }
 regex = "1.10"
+sha2 = "0.10.9"
+encoding_rs = "0.8.35"

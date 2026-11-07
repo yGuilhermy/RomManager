@@ -10,7 +10,7 @@ export async function apiFetch(path: string, options?: RequestInit): Promise<Res
     const attempts = method === "GET" ? 3 : 1;
     for (let attempt = 0; attempt < attempts; attempt++) {
         try {
-            const timeout = AbortSignal.timeout(path === "/api/pcsx2/install" ? 300000 : path.includes("translations") ? 90000 : 30000);
+            const timeout = AbortSignal.timeout(path === "/api/pcsx2/install" ? 300000 : path.startsWith("/api/pcsx2/memory-cards") || path === "/api/pcsx2/resources" && method !== "GET" ? 180000 : path.includes("translations") ? 90000 : 30000);
             const signal = options?.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
             const response = await fetch(url, { ...options, signal });
             if (!response.ok) {

@@ -6,6 +6,7 @@ import { formatBytes, formatDate } from "../lib/format";
 import { parseProfileBackup, PROFILE_COLORS } from "../lib/profileBackup";
 import { CoverImage } from "./CoverImage";
 import { showToast } from "./Toast";
+import { saveGeneratedFile } from "../lib/nativeFiles";
 
 interface Props {
     installed: InstalledGame[];
@@ -164,16 +165,8 @@ export function ProfilePage(props: Props) {
         setBusy(true);
         try {
             const backup = await apiJson<ProfileBackup>("/api/profile/export");
-            const blob = new Blob([JSON.stringify(backup)], { type: "application/json" });
-            const url = URL.createObjectURL(blob);
-            const link = document.createElement("a");
-            link.href = url;
-            link.download = `rommanager-profile-${new Date().toISOString().slice(0, 10)}.json`;
-            document.body.appendChild(link);
-            link.click();
-            link.remove();
-            setTimeout(() => URL.revokeObjectURL(url), 1000);
-            showToast("Backup gerado para download.", "success");
+            const path = await saveGeneratedFile({ kind: "profile", contents: JSON.stringify(backup) });
+            if (path !== null) showToast("Backup salvo.", "success");
         } catch (e) {
             showToast(e instanceof Error ? e.message : "Falha ao exportar backup.", "error");
         } finally {

@@ -118,22 +118,7 @@ pub fn initialize_db(db_path: &Path) -> Result<Connection> {
             updated_at TEXT NOT NULL,
             finished_at TEXT
         );
-        CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
-
-        CREATE TABLE IF NOT EXISTS pcsx2_profiles (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            executable_path TEXT NOT NULL,
-            data_dir TEXT NOT NULL,
-            bios_path TEXT,
-            renderer TEXT NOT NULL DEFAULT 'Vulkan',
-            aspect_ratio TEXT NOT NULL DEFAULT '16:9',
-            fullscreen INTEGER NOT NULL DEFAULT 0,
-            is_active INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_pcsx2_profiles_active ON pcsx2_profiles(is_active);",
+        CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);",
     )?;
 
     let _ = conn.execute(
@@ -142,7 +127,7 @@ pub fn initialize_db(db_path: &Path) -> Result<Connection> {
     );
 
     seed_default_configs(&conn)?;
-    seed_default_pcsx2_profile(&conn)?;
+    migrate_pcsx2_profiles(&mut conn)?;
     let has_path_key: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('games') WHERE name='path_key')",
         [],
@@ -207,23 +192,40 @@ fn seed_default_configs(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn seed_default_pcsx2_profile(conn: &Connection) -> Result<()> {
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM pcsx2_profiles",
+fn migrate_pcsx2_profiles(conn: &mut Connection) -> Result<()> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='pcsx2_profiles')",
         [],
         |r| r.get(0),
     )?;
-    if count == 0 {
-        let now = Utc::now().to_rfc3339();
-        let pcsx2_path = get_config(conn, "pcsx2_path")
-            .unwrap_or_else(|| "C:\\Program Files\\PCSX2\\pcsx2-qt.exe".to_string());
-        conn.execute(
-            "INSERT INTO pcsx2_profiles (id, name, executable_path, data_dir, bios_path, renderer, aspect_ratio, fullscreen, is_active, created_at, updated_at)
-             VALUES ('default', 'Perfil Padrão', ?1, '', NULL, 'Vulkan', '16:9', 0, 1, ?2, ?2)",
-            params![pcsx2_path, now],
-        )?;
+    if !exists {
+        return Ok(());
     }
-    Ok(())
+    let tx = conn.transaction()?;
+    let profiles = {
+        let mut stmt=tx.prepare("SELECT id,name,executable_path,data_dir,bios_path,renderer,aspect_ratio,fullscreen,is_active,created_at,updated_at FROM pcsx2_profiles")?;
+        let rows=stmt.query_map([],|r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"executable_path":r.get::<_,String>(2)?,"data_dir":r.get::<_,String>(3)?,"bios_path":r.get::<_,Option<String>>(4)?,"renderer":r.get::<_,String>(5)?,"aspect_ratio":r.get::<_,String>(6)?,"fullscreen":r.get::<_,i64>(7)?,"is_active":r.get::<_,i64>(8)?,"created_at":r.get::<_,String>(9)?,"updated_at":r.get::<_,String>(10)?})))?;
+        rows.collect::<Result<Vec<_>>>()?
+    };
+    tx.execute(
+        "INSERT OR IGNORE INTO configs(key,value) VALUES('legacy_pcsx2_profiles_backup',?1)",
+        [serde_json::to_string(&profiles).unwrap()],
+    )?;
+    if let Some(active) = profiles.iter().find(|p| p["is_active"] == 1) {
+        let exe = active["executable_path"].as_str().unwrap_or_default();
+        let configured = get_config(&tx, "pcsx2_path").unwrap_or_default();
+        if configured.is_empty() {
+            set_config(&tx, "pcsx2_path", exe)?;
+        }
+        if configured.is_empty() || configured.eq_ignore_ascii_case(exe) {
+            let data = active["data_dir"].as_str().unwrap_or_default();
+            if !data.is_empty() && get_config(&tx, "pcsx2_data_dir").is_none() {
+                set_config(&tx, "pcsx2_data_dir", data)?;
+            }
+        }
+    }
+    tx.execute_batch("DROP TABLE pcsx2_profiles;")?;
+    tx.commit()
 }
 
 pub fn get_config(conn: &Connection, key: &str) -> Option<String> {
@@ -300,6 +302,9 @@ pub fn get_all_configs(conn: &Connection) -> Result<HashMap<String, String>> {
 
     let mut map = HashMap::new();
     for r in rows.flatten() {
+        if r.0 == "legacy_pcsx2_profiles_backup" {
+            continue;
+        }
         map.insert(r.0, r.1);
     }
     Ok(map)

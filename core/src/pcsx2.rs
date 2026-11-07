@@ -1,6 +1,5 @@
 use crate::database;
-use chrono::Utc;
-use rusqlite::{params, Connection};
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Read;
@@ -18,21 +17,6 @@ pub struct Pcsx2Installation {
     pub covers_dir: String,
     pub inis_dir: String,
     pub is_running: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Pcsx2Profile {
-    pub id: String,
-    pub name: String,
-    pub executable_path: String,
-    pub data_dir: String,
-    pub bios_path: Option<String>,
-    pub renderer: String,
-    pub aspect_ratio: String,
-    pub fullscreen: bool,
-    pub is_active: bool,
-    pub created_at: String,
-    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,21 +69,6 @@ pub struct Pcsx2Diagnostic {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ManagedRelease {
-    pub version: String,
-    pub release_name: String,
-    pub channel: String,
-    pub published_at: String,
-    pub download_url: String,
-    pub file_size: u64,
-    pub installed: bool,
-    #[serde(default)]
-    pub executable_path: Option<String>,
-    #[serde(default)]
-    pub data_dir: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoversExportResult {
     pub total_games: usize,
     pub exported: usize,
@@ -110,6 +79,8 @@ pub struct CoversExportResult {
 }
 
 pub fn is_pcsx2_running() -> bool {
+    #[cfg(windows)]
+    if let Some(running)=crate::windows_processes::pcsx2_running() {return running;}
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
@@ -129,17 +100,22 @@ pub fn is_pcsx2_running() -> bool {
 }
 
 pub fn sanitize_path(input: &str) -> String {
-    input.trim().trim_matches('"').trim_matches('\'').trim().to_string()
+    input
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim()
+        .to_string()
 }
 
 fn extract_pe_version(bytes: &[u8]) -> Option<String> {
     let pv_tag = [
-        b'P', 0, b'r', 0, b'o', 0, b'd', 0, b'u', 0, b'c', 0, b't', 0, b'V', 0, b'e', 0, b'r',
-        0, b's', 0, b'i', 0, b'o', 0, b'n', 0,
+        b'P', 0, b'r', 0, b'o', 0, b'd', 0, b'u', 0, b'c', 0, b't', 0, b'V', 0, b'e', 0, b'r', 0,
+        b's', 0, b'i', 0, b'o', 0, b'n', 0,
     ];
     let fv_tag = [
-        b'F', 0, b'i', 0, b'l', 0, b'e', 0, b'V', 0, b'e', 0, b'r', 0, b's', 0, b'i', 0, b'o',
-        0, b'n', 0,
+        b'F', 0, b'i', 0, b'l', 0, b'e', 0, b'V', 0, b'e', 0, b'r', 0, b's', 0, b'i', 0, b'o', 0,
+        b'n', 0,
     ];
 
     for tag in &[&pv_tag[..], &fv_tag[..]] {
@@ -250,7 +226,7 @@ pub fn inspect_installation(exe_path: &Path) -> Result<Pcsx2Installation, String
     }
     let parent_dir = exe_path.parent().unwrap_or(Path::new("."));
     let is_portable =
-        parent_dir.join("portable.ini").exists() || parent_dir.join("inis").is_dir();
+        parent_dir.join("portable.ini").exists() || parent_dir.join("portable.txt").exists();
     let is_managed = parent_dir.join("version.json").exists()
         || parent_dir
             .to_string_lossy()
@@ -259,15 +235,29 @@ pub fn inspect_installation(exe_path: &Path) -> Result<Pcsx2Installation, String
 
     let data_dir = if is_portable {
         parent_dir.to_path_buf()
-    } else if let Ok(user_profile) = std::env::var("USERPROFILE") {
-        let docs_pcsx2 = PathBuf::from(user_profile).join("Documents").join("PCSX2");
-        if docs_pcsx2.exists() {
-            docs_pcsx2
-        } else {
-            parent_dir.to_path_buf()
-        }
     } else {
-        parent_dir.to_path_buf()
+        let mut documents = Command::new("powershell.exe");
+        documents.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "[Environment]::GetFolderPath('MyDocuments')",
+        ]);
+        #[cfg(windows)]
+        let documents = {
+            use std::os::windows::process::CommandExt;
+            documents.creation_flags(0x08000000);
+            documents.output().ok()
+        };
+        #[cfg(not(windows))]
+        let documents: Option<std::process::Output> = None;
+        documents
+            .filter(|o| o.status.success())
+            .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()).join("PCSX2"))
+            .unwrap_or_else(|| {
+                PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default())
+                    .join("Documents/PCSX2")
+            })
     };
 
     let bios_dir = data_dir.join("bios");
@@ -314,7 +304,9 @@ pub fn detect_installations(
         }
     }
     candidates.push(PathBuf::from("C:\\Program Files\\PCSX2\\pcsx2-qt.exe"));
-    candidates.push(PathBuf::from("C:\\Program Files (x86)\\PCSX2\\pcsx2-qt.exe"));
+    candidates.push(PathBuf::from(
+        "C:\\Program Files (x86)\\PCSX2\\pcsx2-qt.exe",
+    ));
     if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
         candidates.push(
             PathBuf::from(local_app_data)
@@ -332,7 +324,11 @@ pub fn detect_installations(
         seen_paths.insert(normalized);
         if let Ok(mut info) = inspect_installation(&path) {
             info.is_running = running;
-            if info.is_managed && results.iter().any(|existing: &Pcsx2Installation| existing.is_managed && existing.version == info.version) {
+            if info.is_managed
+                && results.iter().any(|existing: &Pcsx2Installation| {
+                    existing.is_managed && existing.version == info.version
+                })
+            {
                 continue;
             }
             results.push(info);
@@ -343,7 +339,13 @@ pub fn detect_installations(
 }
 
 pub fn compute_sha1(data: &[u8]) -> String {
-    let mut state = [0x67452301u32, 0xEFCDAB89u32, 0x98BADCFEu32, 0x10325476u32, 0xC3D2E1F0u32];
+    let mut state = [
+        0x67452301u32,
+        0xEFCDAB89u32,
+        0x98BADCFEu32,
+        0x10325476u32,
+        0xC3D2E1F0u32,
+    ];
 
     let process_block = |block: &[u8], h: &mut [u32; 5]| {
         let mut w = [0u32; 80];
@@ -550,10 +552,7 @@ pub fn identify_bios(filename: &str, sha1: &str) -> (String, String, String) {
             || m.ends_with('4')
         {
             "Europe / PAL"
-        } else if lower_name.contains("jap")
-            || lower_name.contains("ntsc-j")
-            || m.ends_with('0')
-        {
+        } else if lower_name.contains("jap") || lower_name.contains("ntsc-j") || m.ends_with('0') {
             "Japan / NTSC-J"
         } else if lower_name.contains("asia") || m.ends_with('6') || m.ends_with('7') {
             "Asia"
@@ -645,11 +644,18 @@ pub fn scan_bios_directory(bios_dir: &Path, active_bios_path: Option<&str>) -> V
                         .map(|ap| {
                             let ap_clean = sanitize_path(ap);
                             let ap_path = Path::new(&ap_clean);
-                            if ap_path == path || ap_clean.eq_ignore_ascii_case(&path.to_string_lossy()) {
+                            if ap_path == path
+                                || ap_clean.eq_ignore_ascii_case(&path.to_string_lossy())
+                            {
                                 return true;
                             }
-                            if let (Some(ap_name), Some(cur_name)) = (ap_path.file_name(), path.file_name()) {
-                                if ap_name.to_string_lossy().eq_ignore_ascii_case(&cur_name.to_string_lossy()) {
+                            if let (Some(ap_name), Some(cur_name)) =
+                                (ap_path.file_name(), path.file_name())
+                            {
+                                if ap_name
+                                    .to_string_lossy()
+                                    .eq_ignore_ascii_case(&cur_name.to_string_lossy())
+                                {
                                     return true;
                                 }
                             }
@@ -685,12 +691,19 @@ pub fn scan_bios_directory(bios_dir: &Path, active_bios_path: Option<&str>) -> V
         }
     }
 
-    list.sort_by(|a, b| b.is_active.cmp(&a.is_active).then_with(|| a.filename.cmp(&b.filename)));
+    list.sort_by(|a, b| {
+        b.is_active
+            .cmp(&a.is_active)
+            .then_with(|| a.filename.cmp(&b.filename))
+    });
 
     list
 }
 
-pub fn import_bios_archive(bios_dir: &Path, source_file: &Path) -> Result<BiosImportResult, String> {
+pub fn import_bios_archive(
+    bios_dir: &Path,
+    source_file: &Path,
+) -> Result<BiosImportResult, String> {
     if !source_file.exists() || !source_file.is_file() {
         return Err("Arquivo de origem da BIOS não existe no disco.".to_string());
     }
@@ -712,10 +725,11 @@ pub fn import_bios_archive(bios_dir: &Path, source_file: &Path) -> Result<BiosIm
                 .map_err(|e| format!("Falha ao criar diretório de BIOS: {}", e))?;
         }
 
-        let mut existing_hashes: std::collections::HashSet<String> = scan_bios_directory(bios_dir, None)
-            .into_iter()
-            .map(|b| b.sha1.to_ascii_lowercase())
-            .collect();
+        let mut existing_hashes: std::collections::HashSet<String> =
+            scan_bios_directory(bios_dir, None)
+                .into_iter()
+                .map(|b| b.sha1.to_ascii_lowercase())
+                .collect();
 
         let mut imported: Vec<BiosInfo> = Vec::new();
         let mut potential_indices: Vec<usize> = Vec::new();
@@ -726,7 +740,11 @@ pub fn import_bios_archive(bios_dir: &Path, source_file: &Path) -> Result<BiosIm
                     continue;
                 }
                 let raw_name = entry.name();
-                let file_part = raw_name.rsplit(['/', '\\']).next().unwrap_or(raw_name).to_lowercase();
+                let file_part = raw_name
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or(raw_name)
+                    .to_lowercase();
                 let is_valid_name = file_part.ends_with(".bin")
                     || file_part.ends_with(".rom")
                     || file_part.ends_with(".gz")
@@ -751,7 +769,11 @@ pub fn import_bios_archive(bios_dir: &Path, source_file: &Path) -> Result<BiosIm
             };
 
             let raw_name = entry.name().to_string();
-            let file_part = raw_name.rsplit(['/', '\\']).next().unwrap_or(&raw_name).to_lowercase();
+            let file_part = raw_name
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(&raw_name)
+                .to_lowercase();
             let is_valid_name = file_part.ends_with(".bin")
                 || file_part.ends_with(".rom")
                 || file_part.ends_with(".gz")
@@ -790,13 +812,23 @@ pub fn import_bios_archive(bios_dir: &Path, source_file: &Path) -> Result<BiosIm
                 })
                 .collect();
 
-            let base_name = if safe_name.is_empty() { "bios.bin".to_string() } else { safe_name };
+            let base_name = if safe_name.is_empty() {
+                "bios.bin".to_string()
+            } else {
+                safe_name
+            };
             let mut final_name = base_name.clone();
             let mut target_path = bios_dir.join(&final_name);
             let mut counter = 1;
             while target_path.exists() {
-                let stem = Path::new(&base_name).file_stem().and_then(|s| s.to_str()).unwrap_or("bios");
-                let ext_part = Path::new(&base_name).extension().and_then(|e| e.to_str()).unwrap_or("bin");
+                let stem = Path::new(&base_name)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("bios");
+                let ext_part = Path::new(&base_name)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("bin");
                 final_name = format!("{}_{}.{}", stem, counter, ext_part);
                 target_path = bios_dir.join(&final_name);
                 counter += 1;
@@ -824,7 +856,10 @@ pub fn import_bios_archive(bios_dir: &Path, source_file: &Path) -> Result<BiosIm
         }
 
         if imported.is_empty() {
-            return Err("Todas as BIOS encontradas no pacote ZIP já estão instaladas no emulador.".to_string());
+            return Err(
+                "Todas as BIOS encontradas no pacote ZIP já estão instaladas no emulador."
+                    .to_string(),
+            );
         }
 
         let first = imported[0].clone();
@@ -832,7 +867,10 @@ pub fn import_bios_archive(bios_dir: &Path, source_file: &Path) -> Result<BiosIm
         return Ok(BiosImportResult {
             count,
             items: imported,
-            message: format!("{} arquivo(s) de BIOS importado(s) com sucesso a partir do arquivo ZIP.", count),
+            message: format!(
+                "{} arquivo(s) de BIOS importado(s) com sucesso a partir do arquivo ZIP.",
+                count
+            ),
             filename: first.filename,
             path: first.path,
             size: first.size,
@@ -877,9 +915,11 @@ pub fn import_bios_file(bios_dir: &Path, source_file: &Path) -> Result<BiosInfo,
 
     if ext == "zip" {
         let pkg = import_bios_archive(bios_dir, source_file)?;
-        return pkg.items.into_iter().next().ok_or_else(|| {
-            "Nenhuma BIOS válida foi encontrada no arquivo ZIP.".to_string()
-        });
+        return pkg
+            .items
+            .into_iter()
+            .next()
+            .ok_or_else(|| "Nenhuma BIOS válida foi encontrada no arquivo ZIP.".to_string());
     }
 
     if !matches!(ext.as_str(), "bin" | "rom" | "gz" | "bios" | "") {
@@ -952,151 +992,7 @@ pub fn import_bios_file(bios_dir: &Path, source_file: &Path) -> Result<BiosInfo,
     })
 }
 
-pub fn list_profiles(conn: &Connection) -> Result<Vec<Pcsx2Profile>, String> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, name, executable_path, data_dir, bios_path, renderer, aspect_ratio, fullscreen, is_active, created_at, updated_at
-             FROM pcsx2_profiles
-             ORDER BY is_active DESC, name ASC",
-        )
-        .map_err(|e| e.to_string())?;
-
-    let rows = stmt
-        .query_map([], |row| {
-            Ok(Pcsx2Profile {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                executable_path: row.get(2)?,
-                data_dir: row.get(3)?,
-                bios_path: row.get(4)?,
-                renderer: row.get(5)?,
-                aspect_ratio: row.get(6)?,
-                fullscreen: row.get::<_, i64>(7)? != 0,
-                is_active: row.get::<_, i64>(8)? != 0,
-                created_at: row.get(9)?,
-                updated_at: row.get(10)?,
-            })
-        })
-        .map_err(|e| e.to_string())?;
-
-    let mut list = Vec::new();
-    for r in rows {
-        if let Ok(p) = r {
-            list.push(p);
-        }
-    }
-    Ok(list)
-}
-
-pub fn get_active_profile(conn: &Connection) -> Result<Pcsx2Profile, String> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, name, executable_path, data_dir, bios_path, renderer, aspect_ratio, fullscreen, is_active, created_at, updated_at
-             FROM pcsx2_profiles
-             WHERE is_active = 1
-             LIMIT 1",
-        )
-        .map_err(|e| e.to_string())?;
-
-    stmt.query_row([], |row| {
-        Ok(Pcsx2Profile {
-            id: row.get(0)?,
-            name: row.get(1)?,
-            executable_path: row.get(2)?,
-            data_dir: row.get(3)?,
-            bios_path: row.get(4)?,
-            renderer: row.get(5)?,
-            aspect_ratio: row.get(6)?,
-            fullscreen: row.get::<_, i64>(7)? != 0,
-            is_active: row.get::<_, i64>(8)? != 0,
-            created_at: row.get(9)?,
-            updated_at: row.get(10)?,
-        })
-    })
-    .map_err(|e| format!("Nenhum perfil ativo encontrado: {}", e))
-}
-
-pub fn save_profile(conn: &mut Connection, profile: &Pcsx2Profile) -> Result<(), String> {
-    if is_pcsx2_running() {
-        return Err(
-            "O PCSX2 está aberto. Feche o emulador antes de salvar alterações nos perfis para evitar perda de dados."
-                .to_string(),
-        );
-    }
-
-    if profile.name.trim().is_empty() {
-        return Err("O nome do perfil não pode ser vazio.".to_string());
-    }
-
-    if profile.executable_path.trim().is_empty() {
-        return Err("O caminho do executável do PCSX2 não pode ser vazio.".to_string());
-    }
-
-    let now = Utc::now().to_rfc3339();
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
-
-    if profile.is_active {
-        tx.execute("UPDATE pcsx2_profiles SET is_active = 0", [])
-            .map_err(|e| e.to_string())?;
-    }
-
-    tx.execute(
-        "INSERT INTO pcsx2_profiles (id, name, executable_path, data_dir, bios_path, renderer, aspect_ratio, fullscreen, is_active, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-         ON CONFLICT(id) DO UPDATE SET
-            name = excluded.name,
-            executable_path = excluded.executable_path,
-            data_dir = excluded.data_dir,
-            bios_path = excluded.bios_path,
-            renderer = excluded.renderer,
-            aspect_ratio = excluded.aspect_ratio,
-            fullscreen = excluded.fullscreen,
-            is_active = excluded.is_active,
-            updated_at = excluded.updated_at",
-        params![
-            profile.id,
-            profile.name,
-            profile.executable_path,
-            profile.data_dir,
-            profile.bios_path,
-            profile.renderer,
-            profile.aspect_ratio,
-            if profile.fullscreen { 1 } else { 0 },
-            if profile.is_active { 1 } else { 0 },
-            profile.created_at,
-            now,
-        ],
-    )
-    .map_err(|e| e.to_string())?;
-
-    if profile.is_active {
-        let _ = tx.execute(
-            "INSERT INTO configs (key, value) VALUES ('pcsx2_path', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![profile.executable_path],
-        );
-        let _ = tx.execute(
-            "INSERT INTO configs (key, value) VALUES ('pcsx2_executable_path', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![profile.executable_path],
-        );
-        if !profile.data_dir.is_empty() {
-            let _ = tx.execute(
-                "INSERT INTO configs (key, value) VALUES ('pcsx2_data_dir', ?1)
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                params![profile.data_dir],
-            );
-        }
-    }
-
-    tx.commit().map_err(|e| e.to_string())?;
-    if profile.is_active {
-        let _ = apply_profile_to_ini(profile);
-    }
-    Ok(())
-}
-
-fn set_ini_value(ini_text: &str, target_section: &str, key: &str, value: &str) -> String {
+pub fn set_ini_value(ini_text: &str, target_section: &str, key: &str, value: &str) -> String {
     let mut lines: Vec<String> = ini_text.lines().map(|s| s.to_string()).collect();
     let section_header = format!("[{}]", target_section);
     let mut current_section: Option<String> = None;
@@ -1142,695 +1038,172 @@ fn set_ini_value(ini_text: &str, target_section: &str, key: &str, value: &str) -
     lines.join("\r\n")
 }
 
-pub fn apply_profile_to_ini(profile: &Pcsx2Profile) -> Result<(), String> {
-    let data_dir = if !profile.data_dir.is_empty() {
-        PathBuf::from(&profile.data_dir)
+pub fn current_installation(conn: &Connection) -> Result<Pcsx2Installation, String> {
+    let exe = database::get_config(conn, "pcsx2_path")
+        .ok_or("Configure o executável do PCSX2 em Configurações.")?;
+    let mut installation = inspect_installation(Path::new(&sanitize_path(&exe)))?;
+    if let Some(data) =
+        database::get_config(conn, "pcsx2_data_dir").filter(|s| !s.trim().is_empty())
+    {
+        installation.data_dir = sanitize_path(&data);
+    }
+    installation.inis_dir = Path::new(&installation.data_dir)
+        .join("inis")
+        .to_string_lossy()
+        .into();
+    installation.bios_dir = resolve_folder(&installation, "Bios", "bios")
+        .to_string_lossy()
+        .into();
+    installation.covers_dir = resolve_folder(&installation, "Covers", "covers")
+        .to_string_lossy()
+        .into();
+    Ok(installation)
+}
+fn resolve_folder(installation: &Pcsx2Installation, key: &str, fallback: &str) -> PathBuf {
+    let data = Path::new(&installation.data_dir);
+    let ini = fs::read_to_string(data.join("inis/PCSX2.ini")).unwrap_or_default();
+    let folder = crate::memory_cards::ini_value(&ini, "Folders", key)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(fallback.into());
+    let folder = PathBuf::from(folder);
+    if folder.is_absolute() {
+        folder
     } else {
-        let exe_path = PathBuf::from(&profile.executable_path);
-        if let Ok(insp) = inspect_installation(&exe_path) {
-            PathBuf::from(insp.data_dir)
-        } else {
-            exe_path.parent().unwrap_or(Path::new(".")).to_path_buf()
-        }
+        data.join(folder)
+    }
+}
+pub fn native_folder(conn: &Connection, key: &str, fallback: &str) -> Result<PathBuf, String> {
+    Ok(resolve_folder(&current_installation(conn)?, key, fallback))
+}
+pub fn installation_id(conn: &Connection) -> Result<String, String> {
+    let i = current_installation(conn)?;
+    let normalize = |p: &str| {
+        fs::canonicalize(p)
+            .unwrap_or_else(|_| PathBuf::from(p))
+            .to_string_lossy()
+            .to_lowercase()
     };
-
-    let inis_dir = data_dir.join("inis");
-    if fs::create_dir_all(&inis_dir).is_err() {
-        return Err("Falha ao criar diretório inis do PCSX2.".to_string());
-    }
-
-    let ini_path = inis_dir.join("PCSX2.ini");
-    let content = if ini_path.exists() {
-        fs::read_to_string(&ini_path).unwrap_or_default()
-    } else {
-        String::new()
-    };
-
-    let is_wide = profile.aspect_ratio == "16:9" || profile.aspect_ratio.contains("16:9");
-    let aspect_val = if is_wide { "16:9" } else { "4:3" };
-    let wide_patches = if is_wide { "true" } else { "false" };
-
-    let mut updated = set_ini_value(&content, "EmuCore/GS", "AspectRatio", aspect_val);
-    updated = set_ini_value(&updated, "UI", "AspectRatio", aspect_val);
-    updated = set_ini_value(&updated, "EmuCore", "EnableWideScreenPatches", wide_patches);
-    updated = set_ini_value(&updated, "EmuCore/GS", "Renderer", &profile.renderer);
-
-    if let Some(ref b) = profile.bios_path {
-        let bios_name = Path::new(b)
-            .file_name()
-            .and_then(|f| f.to_str())
-            .unwrap_or(b);
-        updated = set_ini_value(&updated, "Filenames", "BIOS", bios_name);
-    }
-
-    fs::write(&ini_path, updated.as_bytes()).map_err(|e| format!("Falha ao gravar PCSX2.ini: {}", e))?;
-    Ok(())
+    Ok(crate::memory_cards::digest(
+        format!("{}|{}", normalize(&i.path), normalize(&i.data_dir)).as_bytes(),
+    ))
 }
-
-pub fn set_active_profile(conn: &mut Connection, id: &str) -> Result<(), String> {
-    if is_pcsx2_running() {
-        return Err("O PCSX2 está aberto. Feche o emulador antes de alternar perfis.".to_string());
+pub fn active_bios(conn: &Connection) -> Result<Option<String>, String> {
+    let data = current_installation(conn)?.data_dir;
+    let ini = fs::read_to_string(Path::new(&data).join("inis/PCSX2.ini")).unwrap_or_default();
+    Ok(crate::memory_cards::ini_value(&ini, "Filenames", "BIOS")
+        .filter(|s| !s.is_empty())
+        .map(|p| {
+            {
+                let p = PathBuf::from(p);
+                if p.is_absolute() {
+                    p
+                } else {
+                    native_folder(conn, "Bios", "bios").unwrap().join(p)
+                }
+            }
+            .to_string_lossy()
+            .into_owned()
+        }))
+}
+pub fn select_bios(conn: &Connection, source: &str) -> Result<(), String> {
+    crate::memory_cards::writable()?;
+    let path = PathBuf::from(sanitize_path(source));
+    let folder = native_folder(conn, "Bios", "bios")?;
+    if path.canonicalize().map_err(|e| e.to_string())?.parent()
+        != Some(folder.canonicalize().map_err(|e| e.to_string())?.as_path())
+    {
+        return Err("Selecione uma BIOS da pasta configurada no PCSX2.".into());
     }
-
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
-    tx.execute("UPDATE pcsx2_profiles SET is_active = 0", [])
-        .map_err(|e| e.to_string())?;
-    let affected = tx
-        .execute(
-            "UPDATE pcsx2_profiles SET is_active = 1 WHERE id = ?1",
-            params![id],
+    if !scan_bios_directory(&folder, None)
+        .iter()
+        .any(|b| b.path == path.to_string_lossy() && b.is_valid)
+    {
+        return Err("BIOS inválida".into());
+    }
+    let target = Path::new(&current_installation(conn)?.data_dir).join("inis/PCSX2.ini");
+    let ini = fs::read_to_string(&target).unwrap_or_default();
+    let next = set_ini_value(
+        &ini,
+        "Filenames",
+        "BIOS",
+        &path.file_name().unwrap().to_string_lossy(),
+    );
+    fs::create_dir_all(target.parent().unwrap()).map_err(|e| e.to_string())?;
+    if target.exists() {
+        fs::copy(
+            &target,
+            target.with_file_name(format!(
+                "PCSX2.before-bios-{}.ini",
+                crate::memory_cards::stamp()
+            )),
         )
         .map_err(|e| e.to_string())?;
-    if affected == 0 {
-        return Err("Perfil não encontrado.".to_string());
     }
-
-    let profile: Option<Pcsx2Profile> = tx
-        .query_row(
-            "SELECT id, name, executable_path, data_dir, bios_path, renderer, aspect_ratio, fullscreen, is_active, created_at, updated_at
-             FROM pcsx2_profiles WHERE id = ?1",
-            params![id],
-            |r| {
-                Ok(Pcsx2Profile {
-                    id: r.get(0)?,
-                    name: r.get(1)?,
-                    executable_path: r.get(2)?,
-                    data_dir: r.get(3)?,
-                    bios_path: r.get(4)?,
-                    renderer: r.get(5)?,
-                    aspect_ratio: r.get(6)?,
-                    fullscreen: r.get::<_, i64>(7)? != 0,
-                    is_active: true,
-                    created_at: r.get(9)?,
-                    updated_at: r.get(10)?,
-                })
-            },
-        )
-        .ok();
-
-    if let Some(ref prof) = profile {
-        let _ = tx.execute(
-            "INSERT INTO configs (key, value) VALUES ('pcsx2_path', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![prof.executable_path],
-        );
-        let _ = tx.execute(
-            "INSERT INTO configs (key, value) VALUES ('pcsx2_executable_path', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![prof.executable_path],
-        );
-        if !prof.data_dir.is_empty() {
-            let _ = tx.execute(
-                "INSERT INTO configs (key, value) VALUES ('pcsx2_data_dir', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                params![prof.data_dir],
-            );
-        }
-    }
-
-    tx.commit().map_err(|e| e.to_string())?;
-
-    if let Some(ref prof) = profile {
-        let _ = apply_profile_to_ini(prof);
-    }
-    Ok(())
+    crate::game_resources::atomic_file(&target, next.as_bytes())
 }
-
-pub fn delete_profile(conn: &mut Connection, id: &str) -> Result<(), String> {
-    if is_pcsx2_running() {
-        return Err("O PCSX2 está aberto. Feche o emulador antes de excluir perfis.".to_string());
-    }
-
-    let is_act: bool = conn
-        .query_row(
-            "SELECT is_active FROM pcsx2_profiles WHERE id = ?1",
-            params![id],
-            |r| r.get::<_, i64>(0),
-        )
-        .map(|v| v != 0)
-        .unwrap_or(false);
-
-    if is_act {
-        return Err("Não é permitido excluir o perfil que está atualmente ativo.".to_string());
-    }
-
-    let count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM pcsx2_profiles", [], |r| r.get(0))
-        .unwrap_or(0);
-    if count <= 1 {
-        return Err("Não é possível excluir o único perfil existente.".to_string());
-    }
-
-    conn.execute("DELETE FROM pcsx2_profiles WHERE id = ?1", params![id])
-        .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
 pub fn run_diagnostic(conn: &Connection) -> Result<Pcsx2Diagnostic, String> {
-    let profile = get_active_profile(conn).ok();
-    let pcsx2_exe_path = profile
-        .as_ref()
-        .map(|p| p.executable_path.clone())
-        .or_else(|| database::get_config(conn, "pcsx2_path"))
-        .unwrap_or_default();
-
-    let exe_path = PathBuf::from(&pcsx2_exe_path);
-    let executable_valid = crate::exe_runner::validate_pcsx2_executable(&exe_path);
-    let mut warnings = Vec::new();
-    let mut errors = Vec::new();
-
-    let (executable_version, executable_type, data_dir, bios_dir, covers_dir) = if executable_valid {
-        let insp = inspect_installation(&exe_path).unwrap_or(Pcsx2Installation {
-            path: pcsx2_exe_path.clone(),
-            version: extract_pcsx2_version(&exe_path),
-            is_portable: false,
-            is_managed: false,
-            data_dir: "".to_string(),
-            bios_dir: "".to_string(),
-            covers_dir: "".to_string(),
-            inis_dir: "".to_string(),
-            is_running: false,
-        });
-        let t = if insp.is_managed {
-            "Gerenciado pelo RomManager"
-        } else if insp.is_portable {
-            "Portátil (Portable)"
-        } else {
-            "Instalação Padrão (Shared/Installer)"
-        };
-
-        let resolved_data_dir = profile
-            .as_ref()
-            .map(|p| p.data_dir.clone())
-            .filter(|s| !s.is_empty())
-            .or_else(|| database::get_config(conn, "pcsx2_data_dir").filter(|s| !s.is_empty()))
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(insp.data_dir));
-
-        let resolved_bios_dir = database::get_config(conn, "pcsx2_bios_dir")
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| resolved_data_dir.join("bios"));
-
-        let resolved_covers_dir = resolved_data_dir.join("covers");
-
-        (
-            insp.version,
-            t.to_string(),
-            resolved_data_dir,
-            resolved_bios_dir,
-            resolved_covers_dir,
-        )
-    } else {
-        errors.push(format!(
-            "Executável do PCSX2 não foi encontrado ou é inválido: '{}'",
-            pcsx2_exe_path
-        ));
-        (
-            "Desconhecido".to_string(),
-            "Não encontrado".to_string(),
-            PathBuf::new(),
-            PathBuf::new(),
-            PathBuf::new(),
-        )
+    let result = current_installation(conn);
+    let path = database::get_config(conn, "pcsx2_path").unwrap_or_default();
+    let mut diagnostic = Pcsx2Diagnostic {
+        executable_valid: result.is_ok(),
+        executable_path: path,
+        executable_version: String::new(),
+        executable_type: String::new(),
+        is_running: is_pcsx2_running(),
+        data_dir_valid: false,
+        data_dir_writable: false,
+        bios_dir_valid: false,
+        bios_count: 0,
+        active_bios_valid: false,
+        covers_dir_valid: false,
+        roms_dir_valid: database::get_config(conn, "roms_dir")
+            .is_some_and(|p| Path::new(&p).is_dir()),
+        warnings: vec![],
+        errors: vec![],
     };
-
-    let is_running = is_pcsx2_running();
-    if is_running {
-        warnings.push(
-            "O emulador PCSX2 está aberto. Edições de configuração e perfis estão bloqueadas temporariamente para evitar corrupção."
-                .to_string(),
-        );
-    }
-
-    let data_dir_valid = data_dir.exists() && data_dir.is_dir();
-    let data_dir_writable = if data_dir_valid {
-        let test_file = data_dir.join(".write_test");
-        if fs::write(&test_file, b"test").is_ok() {
-            let _ = fs::remove_file(test_file);
-            true
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-
-    if executable_valid {
-        if !data_dir_valid {
-            warnings.push(format!(
-                "Diretório de dados do PCSX2 não foi encontrado ou não é acessível: '{}'",
-                data_dir.display()
-            ));
-        } else if !data_dir_writable {
-            warnings.push(format!(
-                "O diretório de dados do PCSX2 está protegido contra gravação: '{}'",
-                data_dir.display()
-            ));
-        }
-    }
-
-    let bios_dir_valid = bios_dir.exists() && bios_dir.is_dir();
-    let (bios_count, active_bios_valid) = if bios_dir_valid {
-        let count = fs::read_dir(&bios_dir)
-            .map(|entries| {
-                entries
-                    .flatten()
-                    .filter(|e| {
-                        e.path().is_file()
-                            && matches!(
-                                e.path()
-                                    .extension()
-                                    .and_then(|ext| ext.to_str())
-                                    .unwrap_or("")
-                                    .to_lowercase()
-                                    .as_str(),
-                                "bin" | "rom" | "gz" | "bios" | ""
-                            )
-                    })
-                    .count()
-            })
-            .unwrap_or(0);
-        let active_valid = profile
-            .as_ref()
-            .and_then(|p| p.bios_path.as_deref())
-            .filter(|bp| !bp.trim().is_empty())
-            .map(|bp| Path::new(bp).exists())
-            .unwrap_or(count > 0);
-        if count == 0 {
-            warnings.push(
-                "Nenhuma BIOS encontrada no diretório do PCSX2. Jogos não poderão ser iniciados sem ao menos uma BIOS PS2 instalada."
-                    .to_string(),
-            );
-        }
-        (count, active_valid)
-    } else {
-        warnings.push(format!(
-            "Diretório de BIOS do PCSX2 não existe: '{}'",
-            bios_dir.display()
-        ));
-        (0, false)
-    };
-
-    let covers_dir_valid = covers_dir.exists() && covers_dir.is_dir();
-
-    let roms_dir_str = database::get_config(conn, "roms_dir")
-        .or_else(|| database::get_config(conn, "roms_directory"))
-        .unwrap_or_default();
-    let roms_dir_valid = !roms_dir_str.is_empty() && Path::new(&roms_dir_str).is_dir();
-    if !roms_dir_valid {
-        errors.push(format!(
-            "Diretório de ROMs não configurado ou inexistente: '{}'",
-            roms_dir_str
-        ));
-    }
-
-    Ok(Pcsx2Diagnostic {
-        executable_valid,
-        executable_path: pcsx2_exe_path,
-        executable_version,
-        executable_type,
-        is_running,
-        data_dir_valid,
-        data_dir_writable,
-        bios_dir_valid,
-        bios_count,
-        active_bios_valid,
-        covers_dir_valid,
-        roms_dir_valid,
-        warnings,
-        errors,
-    })
-}
-
-#[derive(Deserialize)]
-struct GhAsset {
-    name: String,
-    size: u64,
-    browser_download_url: String,
-}
-
-#[derive(Deserialize)]
-struct GhRelease {
-    tag_name: String,
-    published_at: Option<String>,
-    prerelease: bool,
-    assets: Vec<GhAsset>,
-}
-
-fn find_windows_qt_asset(assets: &[GhAsset]) -> Option<&GhAsset> {
-    assets.iter().find(|a| {
-        let name = a.name.to_lowercase();
-        name.contains("windows") && name.contains("qt") && name.ends_with(".7z") && !name.contains("symbols")
-    })
-}
-
-pub async fn find_official_release(managed_dir: &Path, tag: &str) -> Result<Vec<ManagedRelease>, String> {
-    if tag.is_empty() || tag.len() > 80 || !tag.bytes().all(|c| c.is_ascii_alphanumeric() || b".-_".contains(&c)) {
-        return Err("Informe uma tag de versão válida, como v2.2.0.".into());
-    }
-    let client = reqwest::Client::builder().user_agent("RomManager").timeout(std::time::Duration::from_secs(15)).build().map_err(|e| e.to_string())?;
-    let release = client.get(format!("https://api.github.com/repos/PCSX2/pcsx2/releases/tags/{}", tag)).send().await.map_err(|e| e.to_string())?.error_for_status().map_err(|_| "Versão não encontrada no GitHub ou limite da API atingido.".to_string())?.json::<GhRelease>().await.map_err(|e| e.to_string())?;
-    let asset = find_windows_qt_asset(&release.assets).ok_or("Esta versão não possui pacote Windows Qt compatível.")?;
-    let version = release.tag_name.trim_start_matches('v');
-    let entry = ManagedRelease {
-        version: if release.prerelease { format!("{}-nightly", version) } else { version.to_string() },
-        release_name: release.tag_name.clone(), channel: if release.prerelease { "nightly" } else { "stable" }.into(),
-        published_at: release.published_at.clone().unwrap_or_default(), download_url: asset.browser_download_url.clone(), file_size: asset.size,
-        installed: false, executable_path: None, data_dir: None,
-    };
-    let mut list = list_official_releases(managed_dir);
-    list.retain(|r| r.version != entry.version);
-    list.insert(0, entry);
-    fs::create_dir_all(managed_dir).map_err(|e| e.to_string())?;
-    fs::write(managed_dir.join("releases_cache_v2.json"), serde_json::to_vec(&list).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    Ok(list_official_releases(managed_dir))
-}
-
-pub async fn list_official_releases_async(managed_dir: &Path, force_refresh: bool) -> Vec<ManagedRelease> {
-    let cache_file = managed_dir.join("releases_cache_v2.json");
-    let mut should_fetch = true;
-
-    if !force_refresh && cache_file.exists() {
-        if let Ok(meta) = fs::metadata(&cache_file) {
-            if let Ok(modified) = meta.modified() {
-                if let Ok(elapsed) = modified.elapsed() {
-                    if elapsed.as_secs() < 1800 {
-                        should_fetch = false;
-                    }
-                }
+    match result {
+        Ok(i) => {
+            diagnostic.executable_version = i.version;
+            diagnostic.executable_type = if i.is_portable {
+                "Portátil"
+            } else {
+                "Instalação do usuário"
+            }
+            .into();
+            diagnostic.data_dir_valid = Path::new(&i.data_dir).is_dir();
+            diagnostic.data_dir_writable =
+                fs::metadata(&i.data_dir).is_ok_and(|m| !m.permissions().readonly());
+            diagnostic.bios_dir_valid = Path::new(&i.bios_dir).is_dir();
+            let bios = scan_bios_directory(Path::new(&i.bios_dir), active_bios(conn)?.as_deref());
+            diagnostic.bios_count = bios.iter().filter(|b| b.is_valid).count();
+            diagnostic.active_bios_valid = bios.iter().any(|b| b.is_active && b.is_valid);
+            diagnostic.covers_dir_valid = Path::new(&i.covers_dir).is_dir();
+            if diagnostic.bios_count == 0 {
+                diagnostic
+                    .warnings
+                    .push("Nenhuma BIOS válida encontrada.".into());
             }
         }
+        Err(e) => diagnostic.errors.push(e),
     }
-
-    if should_fetch {
-        if let Ok(client) = reqwest::Client::builder()
-            .user_agent("RomManager/0.5.1")
-            .timeout(std::time::Duration::from_secs(8))
-            .build()
-        {
-            let mut fetched_releases = Vec::new();
-
-            if let Ok(resp) = client.get("https://api.github.com/repos/PCSX2/pcsx2/releases/latest").send().await {
-                if resp.status().is_success() {
-                    if let Ok(rel) = resp.json::<GhRelease>().await {
-                        if let Some(asset) = find_windows_qt_asset(&rel.assets) {
-                            let tag = rel.tag_name.trim_start_matches('v');
-                            fetched_releases.push(ManagedRelease {
-                                version: tag.to_string(),
-                                release_name: format!("PCSX2 v{} (Estável Oficial)", tag),
-                                channel: "stable".to_string(),
-                                published_at: rel.published_at.unwrap_or_default(),
-                                download_url: asset.browser_download_url.clone(),
-                                file_size: asset.size,
-                                installed: false,
-                                executable_path: None,
-                                data_dir: None,
-                            });
-                        }
-                    }
-                }
-            }
-
-            if let Ok(resp) = client.get("https://api.github.com/repos/PCSX2/pcsx2/releases?per_page=100").send().await {
-                if resp.status().is_success() {
-                    if let Ok(releases) = resp.json::<Vec<GhRelease>>().await {
-                        for rel in releases {
-                            {
-                                if let Some(asset) = find_windows_qt_asset(&rel.assets) {
-                                    let tag = rel.tag_name.trim_start_matches('v');
-                                    fetched_releases.push(ManagedRelease {
-                                        version: if rel.prerelease { format!("{}-nightly", tag) } else { tag.to_string() },
-                                        release_name: format!("PCSX2 v{} Nightly (Canal Oficial)", tag),
-                                        channel: if rel.prerelease { "nightly" } else { "stable" }.to_string(),
-                                        published_at: rel.published_at.unwrap_or_default(),
-                                        download_url: asset.browser_download_url.clone(),
-                                        file_size: asset.size,
-                                        installed: false,
-                                        executable_path: None,
-                                        data_dir: None,
-                                    });
-
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if !fetched_releases.is_empty() {
-                let mut seen = std::collections::HashSet::new();
-                fetched_releases.retain(|r| seen.insert(r.version.clone()));
-                let _ = fs::create_dir_all(managed_dir);
-                let _ = fs::write(&cache_file, serde_json::to_string(&fetched_releases).unwrap_or_default());
-            }
-        }
+    if !diagnostic.roms_dir_valid {
+        diagnostic.errors.push("Pasta de ROMs ausente.".into());
     }
-
-    list_official_releases(managed_dir)
-}
-
-pub fn list_official_releases(managed_dir: &Path) -> Vec<ManagedRelease> {
-    let current_version = if managed_dir.join("version.json").exists() {
-        fs::read_to_string(managed_dir.join("version.json"))
-            .ok()
-            .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
-            .and_then(|v| {
-                v.get("version")
-                    .and_then(|s| s.as_str())
-                    .map(|s| s.to_string())
-            })
-    } else {
-        None
-    };
-
-    let check_installed = |v: &str| -> (bool, Option<String>, Option<String>) {
-        let v_clean = v.trim_start_matches('v');
-        let candidates = [
-            managed_dir.join("versions").join(v),
-            managed_dir.join("versions").join(v_clean),
-            managed_dir.join("versions").join(format!("v{}", v_clean)),
-            managed_dir.join(v),
-            managed_dir.join(v_clean),
-        ];
-        for dir in candidates {
-            let exe = dir.join("pcsx2-qt.exe");
-            if exe.exists() {
-                return (true, Some(exe.to_string_lossy().to_string()), Some(dir.to_string_lossy().to_string()));
-            }
-        }
-        if let Some(cur) = &current_version {
-            if cur.trim_start_matches('v') == v_clean {
-                let exe = managed_dir.join("pcsx2-qt.exe");
-                if exe.exists() {
-                    return (true, Some(exe.to_string_lossy().to_string()), Some(managed_dir.to_string_lossy().to_string()));
-                }
-            }
-        }
-        (false, None, None)
-    };
-
-    let cache_file = managed_dir.join("releases_cache_v2.json");
-    let mut raw_releases: Vec<ManagedRelease> = if cache_file.exists() {
-        fs::read_to_string(&cache_file)
-            .ok()
-            .and_then(|c| serde_json::from_str::<Vec<ManagedRelease>>(&c).ok())
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-
-    let versions_dir = managed_dir.join("versions");
-    if versions_dir.is_dir() {
-        if let Ok(entries) = fs::read_dir(&versions_dir) {
-            for entry in entries.flatten() {
-                let p = entry.path();
-                if p.is_dir() {
-                    let exe = p.join("pcsx2-qt.exe");
-                    if exe.exists() {
-                        let dir_name = entry.file_name().to_string_lossy().to_string();
-                        let dir_clean = dir_name.trim_start_matches('v').to_string();
-                        let already_present = raw_releases.iter().any(|r| {
-                            r.version == dir_name
-                                || r.version.trim_start_matches('v') == dir_clean
-                        });
-                        if !already_present {
-                            let is_nightly = dir_name.to_lowercase().contains("nightly");
-                            raw_releases.push(ManagedRelease {
-                                version: dir_name.clone(),
-                                release_name: format!(
-                                    "PCSX2 v{} (Instalação Local)",
-                                    dir_clean
-                                ),
-                                channel: if is_nightly { "nightly" } else { "stable" }.to_string(),
-                                published_at: String::new(),
-                                download_url: String::new(),
-                                file_size: 0,
-                                installed: true,
-                                executable_path: Some(exe.to_string_lossy().to_string()),
-                                data_dir: Some(p.to_string_lossy().to_string()),
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    for rel in &mut raw_releases {
-        let (inst, exe, dir) = check_installed(&rel.version);
-        if inst {
-            rel.installed = true;
-            rel.executable_path = exe;
-            rel.data_dir = dir;
-        }
-    }
-
-    raw_releases
-}
-
-pub fn install_or_update_managed_pcsx2(
-    managed_dir: &Path,
-    version: &str,
-    mock_payload: Option<&[u8]>,
-    simulate_fail: bool,
-) -> Result<Pcsx2Installation, String> {
-    let backup_dir = managed_dir.with_extension("backup");
-
-    if managed_dir.exists() {
-        if backup_dir.exists() {
-            let _ = fs::remove_dir_all(&backup_dir);
-        }
-        copy_dir_recursive(managed_dir, &backup_dir)
-            .map_err(|e| format!("Falha ao criar backup da versão anterior: {}", e))?;
-    }
-
-    if let Err(e) = apply_managed_install(managed_dir, version, mock_payload, simulate_fail) {
-        if backup_dir.exists() {
-            let _ = fs::remove_dir_all(managed_dir);
-            let _ = copy_dir_recursive(&backup_dir, managed_dir);
-            let _ = fs::remove_dir_all(&backup_dir);
-            return Err(format!(
-                "Falha na extração/instalação. A versão anterior foi restaurada com sucesso. Erro: {}",
-                e
-            ));
-        }
-        return Err(format!("Falha na instalação: {}", e));
-    }
-
-    if backup_dir.exists() {
-        let _ = fs::remove_dir_all(backup_dir);
-    }
-
-    let ver_sub = managed_dir.join("versions").join(version);
-    let exe_sub = ver_sub.join("pcsx2-qt.exe");
-    let exe_path = if exe_sub.exists() {
-        exe_sub
-    } else {
-        managed_dir.join("pcsx2-qt.exe")
-    };
-    inspect_installation(&exe_path)
-}
-
-fn apply_managed_install(
-    managed_dir: &Path,
-    version: &str,
-    mock_payload: Option<&[u8]>,
-    simulate_fail: bool,
-) -> Result<(), String> {
-    if simulate_fail {
-        return Err("Falha simulada durante descompactação do pacote oficial.".to_string());
-    }
-
-    fs::create_dir_all(managed_dir)
-        .map_err(|e| format!("Falha ao criar diretório gerenciado: {}", e))?;
-
-    let is_nightly = version.to_lowercase().contains("nightly");
-    let version_info = serde_json::json!({
-        "version": version,
-        "channel": if is_nightly { "nightly" } else { "stable" },
-        "installed_at": Utc::now().to_rfc3339()
-    });
-
-    let ver_sub = managed_dir.join("versions").join(version);
-    fs::create_dir_all(&ver_sub)
-        .map_err(|e| format!("Falha ao criar diretório da versão {}: {}", version, e))?;
-
-    let exe_sub = ver_sub.join("pcsx2-qt.exe");
-    let exe_root = managed_dir.join("pcsx2-qt.exe");
-
-    if let Some(bytes) = mock_payload {
-        if bytes.starts_with(b"7z\xbc\xaf'\x1c") {
-            let temp_archive = ver_sub.join("download.7z");
-            fs::write(&temp_archive, bytes).map_err(|e| format!("Falha ao gravar arquivo temporário 7z: {}", e))?;
-            if let Err(e) = sevenz_rust::decompress_file(&temp_archive, &ver_sub) {
-                let _ = fs::remove_file(&temp_archive);
-                return Err(format!("Falha ao descompactar pacote 7z oficial: {}", e));
-            }
-            let _ = fs::remove_file(&temp_archive);
-            if !exe_sub.exists() {
-                if let Ok(entries) = walkdir::WalkDir::new(&ver_sub).into_iter().collect::<Result<Vec<_>, _>>() {
-                    for entry in entries {
-                        if entry.file_name().to_string_lossy().eq_ignore_ascii_case("pcsx2-qt.exe") {
-                            let _ = fs::copy(entry.path(), &exe_sub);
-                            break;
-                        }
-                    }
-                }
-            }
-            if exe_sub.exists() {
-                let _ = fs::copy(&exe_sub, &exe_root);
-            }
-        } else {
-            fs::write(&exe_sub, bytes).map_err(|e| format!("Falha ao gravar executável da versão: {}", e))?;
-            fs::write(&exe_root, bytes).map_err(|e| format!("Falha ao gravar executável principal: {}", e))?;
-        }
-    } else {
-        if !exe_sub.exists() {
-            fs::write(&exe_sub, b"MZ_MOCK_PCSX2_QT_EXECUTABLE")
-                .map_err(|e| format!("Falha ao criar executável da versão: {}", e))?;
-        }
-        if !exe_root.exists() {
-            let _ = fs::write(&exe_root, b"MZ_MOCK_PCSX2_QT_EXECUTABLE");
-        }
-    }
-
-    let inis_dir = managed_dir.join("inis");
-    let bios_dir = managed_dir.join("bios");
-    let covers_dir = managed_dir.join("covers");
-    let _ = fs::create_dir_all(inis_dir);
-    let _ = fs::create_dir_all(bios_dir);
-    let _ = fs::create_dir_all(covers_dir);
-    let _ = fs::write(managed_dir.join("portable.ini"), b"");
-    let _ = fs::write(managed_dir.join("version.json"), version_info.to_string());
-
-    let _ = fs::create_dir_all(ver_sub.join("inis"));
-    let _ = fs::create_dir_all(ver_sub.join("bios"));
-    let _ = fs::create_dir_all(ver_sub.join("covers"));
-    let _ = fs::write(ver_sub.join("portable.ini"), b"");
-    let _ = fs::write(ver_sub.join("version.json"), version_info.to_string());
-
-    Ok(())
-}
-
-fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
-    if !dst.exists() {
-        fs::create_dir_all(dst)?;
-    }
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        let target = dst.join(entry.file_name());
-        if ty.is_dir() {
-            copy_dir_recursive(&entry.path(), &target)?;
-        } else {
-            fs::copy(entry.path(), target)?;
-        }
-    }
-    Ok(())
+    Ok(diagnostic)
 }
 
 pub fn export_covers_to_pcsx2(
     conn: &Connection,
     pcsx2_covers_dir: &Path,
     overwrite: bool,
+) -> Result<CoversExportResult, String> {
+    export_covers_for_game(conn, pcsx2_covers_dir, overwrite, None)
+}
+pub fn export_covers_for_game(
+    conn: &Connection,
+    pcsx2_covers_dir: &Path,
+    overwrite: bool,
+    game_id: Option<&str>,
 ) -> Result<CoversExportResult, String> {
     if !pcsx2_covers_dir.exists() {
         fs::create_dir_all(pcsx2_covers_dir)
@@ -1851,6 +1224,10 @@ pub fn export_covers_to_pcsx2(
             .unwrap_or_default()
     };
 
+    let games: Vec<_> = games
+        .into_iter()
+        .filter(|g| game_id.is_none_or(|id| id == g.id))
+        .collect();
     let total_games = games.len();
     let mut exported = 0;
     let mut preserved = 0;
@@ -1921,7 +1298,12 @@ pub fn export_covers_to_pcsx2(
                 && safe_serial[..4].chars().all(|c| c.is_ascii_alphabetic())
                 && safe_serial[4..].chars().all(|c| c.is_ascii_digit())
             {
-                Some(pcsx2_covers_dir.join(format!("{}-{}.{}", &safe_serial[..4], &safe_serial[4..], ext)))
+                Some(pcsx2_covers_dir.join(format!(
+                    "{}-{}.{}",
+                    &safe_serial[..4],
+                    &safe_serial[4..],
+                    ext
+                )))
             } else {
                 None
             };

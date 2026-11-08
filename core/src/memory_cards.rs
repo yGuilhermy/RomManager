@@ -7,7 +7,10 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::Mutex,
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant, UNIX_EPOCH},
 };
 
@@ -295,11 +298,15 @@ pub fn writable() -> McResult<()> {
 pub fn store(db: &Path) -> PathBuf {
     db.parent().unwrap_or(Path::new(".")).join("a4")
 }
+static STAMP_SEQ: AtomicU64 = AtomicU64::new(1);
+
 pub fn stamp() -> String {
+    let seq = STAMP_SEQ.fetch_add(1, Ordering::Relaxed);
     format!(
-        "{}-{}",
+        "{}-{}-{}",
         chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default(),
-        std::process::id()
+        std::process::id(),
+        seq
     )
 }
 pub fn tool_path(db: &Path) -> PathBuf {
@@ -820,6 +827,9 @@ fn cleanup_stale_siblings(dir: &Path) {
 }
 pub fn action(conn: &Connection, db: &Path, p: CardAction) -> McResult<ActionResult> {
     let _guard = EDIT_LOCK.lock().map_err(err)?;
+    action_locked(conn,db,p)
+}
+pub(crate) fn action_locked(conn: &Connection, db: &Path, p: CardAction) -> McResult<ActionResult> {
     writable()?;
     check_installation(conn, &p.installation_id)?;
     let dir = cards_dir(conn)?;

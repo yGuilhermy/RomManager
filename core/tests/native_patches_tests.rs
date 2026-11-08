@@ -30,7 +30,7 @@ impl Fixture {
             root.join("pcsx2-qt.exe").to_str().unwrap(),
         )
         .unwrap();
-        conn.execute("INSERT INTO games(id,title,filename,file_path,file_size,format,serial,date_added) VALUES ('midnight','Midnight Club 3','game.iso','game.iso',0,'ISO','SLUS-21355','now')",[]).unwrap();
+        conn.execute("INSERT OR REPLACE INTO games(id,title,filename,file_path,file_size,format,serial,date_added) VALUES ('midnight','Midnight Club 3','game.iso','game.iso',0,'ISO','SLUS-21355','now')",[]).unwrap();
         let mut zip =
             zip::ZipWriter::new(fs::File::create(root.join("resources/patches.zip")).unwrap());
         zip.start_file(

@@ -3,6 +3,44 @@ import { BrowsePathButton } from "./BrowsePathButton";
 import { apiFetch } from "../lib/api";
 import { useState } from "react";
 import type { ValidationResult,CoverJob } from "../types";
+const credits = [
+    { title: "Projeto", links: [
+        { name: "yGuilhermy e contribuidores", url: "https://github.com/yGuilhermy" },
+    ], detail: "Desenvolvimento do RomManager e projeto de origem." },
+    { title: "Emulador e cartões", links: [
+        { name: "PCSX2", url: "https://pcsx2.net/" },
+        { name: "myMCpp", url: "https://github.com/PCSX2/myMCpp" },
+        { name: "PCSX2 Patches", url: "https://github.com/PCSX2/pcsx2_patches" },
+    ], detail: "Emulador, ferramenta de memory cards e patches." },
+    { title: "Saves e comunidade", links: [
+        { name: "GameFAQs e autores dos saves", url: "https://gamefaqs.gamespot.com/ps2/saves" },
+        { name: "Arquivo GameFAQs de 2023", url: "https://archive.org/details/gamefaqs_savegames" },
+        { name: "Apollo Saves · bucanero", url: "https://github.com/bucanero/apollo-saves" },
+        { name: "RetroAchievements", url: "https://retroachievements.org/" },
+    ], detail: "Saves e consulta de conquistas." },
+    { title: "Cheats e texturas", links: [
+        { name: "PCSX2 Cheats Collection · xs1l3n7x", url: "https://github.com/xs1l3n7x/pcsx2_cheats_collection" },
+        { name: "rac · Made-in-Slovakia", url: "https://github.com/Made-in-Slovakia/rac" },
+    ], detail: "Códigos e texturas compartilhados pela comunidade." },
+    { title: "Capas e catálogo", links: [
+        { name: "ps2-covers · xlenore", url: "https://github.com/xlenore/ps2-covers" },
+        { name: "Libretro Thumbnails", url: "https://github.com/libretro-thumbnails/Sony_-_PlayStation_2" },
+        { name: "Internet Archive", url: "https://archive.org/" },
+        { name: "CDRomance", url: "https://cdromance.org/" },
+        { name: "Wikipédia", url: "https://www.wikipedia.org/" },
+        { name: "PCSX2 Wiki", url: "https://wiki.pcsx2.net/" },
+    ], detail: "Capas, catálogo, traduções e informações dos jogos." },
+    { title: "Tecnologias", links: [
+        { name: "Tauri", url: "https://tauri.app/" },
+        { name: "React", url: "https://react.dev/" },
+        { name: "Vite", url: "https://vite.dev/" },
+        { name: "Rust", url: "https://www.rust-lang.org/" },
+        { name: "Axum", url: "https://github.com/tokio-rs/axum" },
+        { name: "Tokio", url: "https://tokio.rs/" },
+        { name: "Reqwest", url: "https://github.com/seanmonstar/reqwest" },
+        { name: "SQLite", url: "https://sqlite.org/" },
+    ], detail: "E todas as pessoas que mantêm as bibliotecas usadas pelo projeto." },
+];
 interface Props {
     configs:Record<string,string>; onChange:(key:string,value:string)=>void; busy:boolean;
     validations:[ValidationResult|null,ValidationResult|null,ValidationResult|null];
@@ -75,32 +113,17 @@ export function SettingsPage(props:Props) {
                 <h3>RomManager {props.version}</h3>
                 <span className="about-badge">Licença MIT</span>
             </div>
-            <p>Gerenciador local de ROMs de PlayStation 2 com catálogo integrado, download inteligente e execução direta no PCSX2.</p>
-            <p className="field-hint">API local atendendo em <code>127.0.0.1:3000</code>.</p>
-
             <div className="settings-sources-section">
-                <h4>Origem dos dados e acervos de terceiros</h4>
+                <h4>Créditos</h4>
                 <div className="settings-sources-grid">
-                    <div className="settings-source-card">
-                        <strong>Catálogo e ROMs CHD</strong>
-                        <p>Internet Archive (coleções públicas 1G1R para preservação digital do acervo de PS2).</p>
-                    </div>
-                    <div className="settings-source-card">
-                        <strong>Capas e Encartes</strong>
-                        <p>Repositórios abertos Libretro Thumbnails e ps2-covers (xlenore) indexados por serial e título.</p>
-                    </div>
-                    <div className="settings-source-card">
-                        <strong>Pesquisa de Traduções</strong>
-                        <p>CDRomance (consulta sob demanda de títulos com localização em português e modificações comunitárias).</p>
-                    </div>
-                    <div className="settings-source-card">
-                        <strong>Sinopses e Compatibilidade</strong>
-                        <p>Wikipédia (Wikimedia API) para descrições históricas e base oficial comunitária da PCSX2 Wiki.</p>
-                    </div>
+                    {credits.map(group => <div className="settings-source-card" key={group.title}>
+                        <strong>{group.title}</strong>
+                        <p>{group.detail}</p>
+                        <ul className="settings-credit-links">{group.links.map(link => <li key={link.url}><a href={link.url} target="_blank" rel="noreferrer">{link.name}</a></li>)}</ul>
+                    </div>)}
                 </div>
             </div>
-
-            <p className="field-hint settings-disclaimer">Todas as marcas registradas, títulos e materiais gráficos pertencem aos seus respectivos detentores de direitos. O RomManager não comercializa nem hospeda arquivos proprietários ou BIOS de console.</p>
+            <p className="field-hint settings-disclaimer">Os projetos e serviços citados mantêm suas próprias licenças e condições de uso.</p>
         </section>
     </div>;
 }

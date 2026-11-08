@@ -51,6 +51,57 @@ fn entry(n: &str, mode: u16, length: usize) -> R<Vec<u8>> {
     b[64..64 + n.len()].copy_from_slice(n.as_bytes());
     Ok(b)
 }
+/// Reads the unencrypted PS2 file table; PSV signatures are not used by PCSX2.
+pub fn psv_to_psu(bytes: &[u8]) -> R<Vec<u8>> {
+    if bytes.len() < 160 || bytes.len() > 64 * 1024 * 1024 || &bytes[..4] != b"\0VSP"
+        || u32le(bytes, 56)? != 44 || u32le(bytes, 60)? != 2 {
+        return Err("PSV de PS2 inválido ou formato não suportado".into());
+    }
+    let count = u32le(bytes, 100)?;
+    if count == 0 || count > 4094 || u32le(bytes, 120)? != count + 2 {
+        return Err("Tabela de arquivos PSV inválida".into());
+    }
+    let table_end = 160 + count * 60;
+    if table_end > bytes.len() { return Err("PSV truncado".into()); }
+    let read_name = |at: usize| -> R<String> {
+        let raw = bytes.get(at..at+32).ok_or("Nome PSV truncado")?;
+        let end = raw.iter().position(|b| *b == 0).unwrap_or(32);
+        let n = std::str::from_utf8(&raw[..end]).map_err(e)?;
+        mc::name(n)?;
+        if n.starts_with('_') || n.len() > 31 || !n.is_ascii() { return Err("Nome PSV não suportado".into()); }
+        Ok(n.into())
+    };
+    let root = read_name(128)?;
+    let mut header = entry(&root, 0x8427, count+2)?;
+    header[8..16].copy_from_slice(&bytes[104..112]);
+    header[24..32].copy_from_slice(&bytes[112..120]);
+    let mut out = header;
+    out.extend(entry(".", 0x8427, count+2)?);
+    out.extend(entry("..", 0x8427, 0)?);
+    let mut ranges = Vec::new();
+    let mut names = std::collections::HashSet::new();
+    for i in 0..count {
+        let at = 160 + i*60;
+        let name = read_name(at+24)?;
+        if !names.insert(name.to_ascii_lowercase()) { return Err("Nome duplicado no PSV".into()); }
+        let size = u32le(bytes, at+16)?;
+        let start = u32le(bytes, at+56)?;
+        let end = start.checked_add(size).ok_or("Tamanho PSV inválido")?;
+        if start < table_end || end > bytes.len() || ranges.iter().any(|&(a,b)| start < b && end > a) {
+            return Err("Conteúdo PSV truncado ou sobreposto".into());
+        }
+        ranges.push((start,end));
+        let mode = u32le(bytes, at+20)?;
+        if mode & 0x20 != 0 { return Err("Subdiretório PSV não suportado".into()); }
+        let mut header = entry(&name, (mode as u16) | 0x8497, size)?;
+        header[8..16].copy_from_slice(&bytes[at..at+8]);
+        header[24..32].copy_from_slice(&bytes[at+8..at+16]);
+        out.extend(header); out.extend_from_slice(&bytes[start..end]);
+        out.resize(out.len() + (1024-size%1024)%1024, 0);
+        if out.len() > 72*1024*1024 { return Err("Save expandido acima do limite".into()); }
+    }
+    Ok(out)
+}
 fn index(path: &Path) -> R<BTreeMap<String, BTreeMap<String, i64>>> {
     let p = path.join("_pcsx2_index");
     if !p.exists() {

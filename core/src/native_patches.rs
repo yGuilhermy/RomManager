@@ -152,7 +152,7 @@ pub fn set_list(text: &str, section: &str, key: &str, values: &[String]) -> Stri
     }
     lines.join("\r\n")
 }
-fn parse(text: &str, kind: &str, source: &str, bundled: bool) -> Vec<Group> {
+pub(crate) fn parse(text: &str, kind: &str, source: &str, bundled: bool) -> Vec<Group> {
     let mut groups: Vec<Group> = Vec::new();
     for raw in text.trim_start_matches('\u{feff}').lines() {
         let line = raw.split("//").next().unwrap_or("").trim();

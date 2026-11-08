@@ -1,6 +1,7 @@
 pub mod achievements;
 pub mod api_roms;
 pub mod cache;
+pub mod catalog_refresh;
 pub mod chd;
 pub mod covers;
 pub mod database;
@@ -15,6 +16,11 @@ mod windows_processes;
 pub mod profile;
 pub mod resource_settings;
 pub mod native_patches;
+pub mod online_http;
+pub mod extras_sources;
+pub mod gamefaqs;
+pub mod extras_install;
+mod extras_api;
 pub mod rom_scanner;
 pub mod save_formats;
 pub mod save_actions;
@@ -203,6 +209,12 @@ pub async fn start_api() {
         .route("/api/config/validate-covers-dir", get(validate_covers_dir))
         .route("/api/covers/serve", get(serve_cover))
         .route("/api/catalog", get(get_catalog))
+        .route("/api/catalog/status", get(extras_api::catalog_status))
+        .route("/api/catalog/refresh", post(extras_api::catalog_update))
+        .route("/api/extras/games", get(extras_api::games))
+        .route("/api/extras/items", get(extras_api::items))
+        .route("/api/extras/operations", post(extras_api::start))
+        .route("/api/extras/operations/:id", get(extras_api::operation))
         .route("/api/roms/catalog", get(get_catalog))
         .route("/api/roms/translations", get(get_translations))
         .route("/api/games", get(list_games))
@@ -565,11 +577,13 @@ async fn cache_prefetch_handler(
     StatusCode::ACCEPTED
 }
 
-async fn get_catalog(Query(q): Query<CatalogQuery>) -> Json<api_roms::CatalogResponse> {
+async fn get_catalog(State(state): State<Arc<AppState>>, Query(q): Query<CatalogQuery>) -> Json<api_roms::CatalogResponse> {
     let page = q.page.unwrap_or(1);
     let per_page = q.per_page.unwrap_or(24);
     let search_query = q.q.or(q.search);
-    let res = api_roms::query_catalog_with_format(
+    let snapshot=catalog_refresh::snapshot(&state.db_path);
+    let res = api_roms::query_catalog_items(
+        &snapshot.items,
         search_query.as_deref(),
         q.region.as_deref(),
         q.category.as_deref(),

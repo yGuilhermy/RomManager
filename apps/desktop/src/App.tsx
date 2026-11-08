@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import "./App.css";
-import { apiFetch, apiJson } from "./lib/api";
+import { apiFetch, apiJson, invalidatePcsx2Cache } from "./lib/api";
 import { DeleteGameDialog } from "./components/DeleteGameDialog";
 import type { InstalledGame, FavoriteItem, HistoryItem, ValidationResult, CoverJob, JobItem, IntegrityResult } from "./types";
 import { formatBytes } from "./lib/format";
@@ -15,6 +15,9 @@ import { GameCompatibilityPanel } from "./components/GameCompatibilityPanel";
 import { MemoryCardsPage } from "./components/MemoryCardsPage";
 import { BiosPage } from "./components/BiosPage";
 import { AchievementsPage } from "./components/AchievementsPage";
+import { ExtrasPage } from "./components/ExtrasPage";
+import { CatalogUpdate } from "./components/CatalogUpdate";
+import { completedOnlineJobs,EXTRAS_APPLIED_EVENT,type ExtraOperation } from "./lib/extras";
 import packageInfo from "../package.json";
 import logoUrl from "./assets/logo.png";
 import { ToastContainer, showToast } from "./components/Toast";
@@ -75,7 +78,7 @@ interface GameMetadata {
     compatibility: Pcsx2Compat | null;
 }
 
-type Tab = "memory-cards" | "library" | "bios" | "achievements" | "catalog" | "search" | "downloads" | "activity" | "settings" | "profile" | "game-page";
+type Tab = "memory-cards" | "library" | "bios" | "achievements" | "catalog" | "extras" | "search" | "downloads" | "activity" | "settings" | "profile" | "game-page";
 
 const PER_PAGE_OPTIONS = [12, 24, 48, 96];
 
@@ -124,6 +127,7 @@ function renderNavIcon(id: Tab) {
                     <line x1="1" y1="14" x2="4" y2="14" />
                 </svg>
             );
+        case "extras":
         case "catalog":
             return (
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -234,6 +238,7 @@ export default function App() {
     const [isBulkSelectActive, setIsBulkSelectActive] = useState(false);
     const [queuePaused, setQueuePaused] = useState(false);
     const [jobs, setJobs] = useState<JobItem[]>([]);
+    const onlineJobsSeen = useRef<Map<string,string>|null>(null);
 
     const [configs, setConfigs] = useState<Record<string, string>>({
         roms_directory: "",
@@ -498,6 +503,7 @@ export default function App() {
     const fetchJobs = useCallback(async () => {
         try {
             const data = await apiJson<JobItem[]>("/api/jobs");
+            if(onlineJobsSeen.current===null)onlineJobsSeen.current=new Map(data.map(job=>[job.id,job.status]));
             setJobs(data);
             reportLoad("Atividade");
         } catch (error) {
@@ -508,6 +514,25 @@ export default function App() {
             reportLoad("Atividade", error);
         }
     }, [reportLoad]);
+
+    useEffect(()=>{
+        if(onlineJobsSeen.current===null)return;
+        const completed=completedOnlineJobs(onlineJobsSeen.current,jobs);
+        onlineJobsSeen.current=new Map(jobs.map(job=>[job.id,job.status]));
+        const syncNative=()=>{
+            invalidatePcsx2Cache("/api/pcsx2/resources");
+            invalidatePcsx2Cache("/api/pcsx2/memory-cards");
+            window.dispatchEvent(new Event(EXTRAS_APPLIED_EVENT));
+        };
+        for(const job of completed){
+            if(job.kind==="catalog-refresh"&&job.status==="succeeded"){
+                void fetchCatalog(catalogPage,catalogTab,catalogLetter,catalogSearch,perPage,catalogSort,catalogRegion);
+            }else if(job.kind==="extra"){
+                if(job.status!=="succeeded")syncNative();
+                else void apiJson<ExtraOperation>(`/api/extras/operations/${encodeURIComponent(job.id)}`).then(result=>{if(result.result?.applied)syncNative();}).catch(()=>syncNative());
+            }
+        }
+    },[jobs,fetchCatalog,catalogPage,catalogTab,catalogLetter,catalogSearch,perPage,catalogSort,catalogRegion]);
 
     useEffect(() => {
         fetchInstalledGames();
@@ -1200,6 +1225,7 @@ export default function App() {
                     {([
                         { id: "catalog" as Tab, label: "Catálogo PS2" },
                         { id: "search" as Tab, label: "Pesquisa" },
+                        { id: "extras" as Tab, label: "Extras" },
                         { id: "downloads" as Tab, label: "Downloads" }
                     ] as const).map(item => (
                         <button
@@ -1295,6 +1321,7 @@ export default function App() {
                         {activeTab === "bios" && <div className="result-count">Gestão de BIOS</div>}
                         {activeTab === "memory-cards" && <div className="result-count">Memory cards</div>}
                         {activeTab === "achievements" && <div className="result-count">Conquistas · RetroAchievements</div>}
+                        {activeTab === "extras" && <div className="result-count">Extras · PlayStation 2</div>}
                         {activeTab === "activity" && <div className="result-count">Central de Atividade</div>}
                         {activeTab === "settings" && <div className="result-count">Configurações</div>}
                         {activeTab === "profile" && <div className="result-count">Perfil</div>}
@@ -1304,6 +1331,7 @@ export default function App() {
                     {Object.keys(loadErrors).length>0 && <div className="load-errors" role="alert"><strong>Não foi possível atualizar alguns dados. Os últimos resultados foram mantidos.</strong>{Object.entries(loadErrors).map(([key,message])=><p key={key}>{key}: {message}</p>)}<button type="button" onClick={()=>{void fetchInstalledGames();void fetchDownloads();void fetchFavorites();void fetchHistory();void fetchLogs();if(loadErrors["Configurações"])void fetchConfigs();void fetchCatalog(catalogPage,catalogTab,catalogLetter,catalogSearch,perPage,catalogSort,catalogRegion);}}>Tentar novamente</button></div>}
                     {activeTab === "catalog" && <>
                         <section className="catalog-heading panel"><div><p className="field-hint">PLAYSTATION 2</p><h1>Catálogo PS2</h1></div><span className="field-hint">{catalog.total.toLocaleString("pt-BR")} resultados</span></section>
+                        <CatalogUpdate onUpdated={()=>void fetchCatalog(catalogPage,catalogTab,catalogLetter,catalogSearch,perPage,catalogSort,catalogRegion)}/>
                         <div className="catalog-toolbar">
                             <div className="sort-tabs"><button type="button" className={`sort-tab-btn${catalogTab==="popular"?" active":""}`} onClick={()=>{setCatalogTab("popular");setCatalogLetter("");setCatalogPage(1);}}>Populares</button><button type="button" className={`sort-tab-btn${catalogTab==="az"?" active":""}`} onClick={()=>{setCatalogTab("az");setCatalogPage(1);}}>Todos (A–Z)</button></div>
                             <div className="catalog-toolbar-right">
@@ -1516,6 +1544,7 @@ export default function App() {
                         onRefresh={async()=>{await Promise.all([fetchInstalledGames(),fetchFavorites(),fetchHistory()]);}} />}
                     {activeTab === "bios" && <BiosPage onShowToast={showToast} />}
                     {activeTab === "memory-cards" && <MemoryCardsPage />}
+                    {activeTab === "extras" && <ExtrasPage installed={installedGames} />}
                     {activeTab === "achievements" && <AchievementsPage onShowToast={showToast} />}
 
                     {activeTab === "game-page" && selectedGame && (

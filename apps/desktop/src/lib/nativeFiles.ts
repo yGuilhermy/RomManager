@@ -23,7 +23,7 @@ export async function choosePath(options: PathChoice): Promise<string | null> {
   });
 }
 
-export async function saveGeneratedFile(request: { kind: "save"; source: string } | { kind: "profile"; contents: string }): Promise<string | null> {
+export async function saveGeneratedFile(request: { kind: "save" | "extra"; source: string } | { kind: "profile"; contents: string }): Promise<string | null> {
   requireDesktop();
   return await invoke<string | null>("save_generated_file", { request });
 }

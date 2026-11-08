@@ -120,7 +120,7 @@ impl JobManager {
         }
     }
 
-    pub fn create_job(&self, kind: &str, title: &str, total_steps: i64) -> rusqlite::Result<JobRecord> {
+    pub fn begin_task(&self, kind: &str, title: &str, total_steps: i64) -> rusqlite::Result<JobRecord> {
         let seq = JOB_COUNTER.fetch_add(1, Ordering::Relaxed);
         let id = format!("job_{}_{}", Utc::now().timestamp_millis(), seq);
         let now = Utc::now().to_rfc3339();
@@ -169,12 +169,43 @@ impl JobManager {
             .unwrap()
             .insert(id.clone(), Arc::clone(&cancel_flag));
 
+        Ok(record)
+    }
+
+    pub fn create_job(&self, kind: &str, title: &str, total_steps: i64) -> rusqlite::Result<JobRecord> {
+        let record = self.begin_task(kind, title, total_steps)?;
+        let id = record.id.clone();
+        let total = record.total_steps;
+        let cancel_flag = self.cancellations.lock().unwrap().get(&id).cloned().unwrap();
         let runner = self.clone();
         tokio::spawn(async move {
             runner.run_simulated_job(id, total, cancel_flag).await;
         });
 
         Ok(record)
+    }
+
+    pub fn cancelled(&self, id: &str) -> bool {
+        self.cancellations.lock().map(|m| m.get(id).is_none_or(|v| v.load(Ordering::Relaxed))).unwrap_or(true)
+    }
+
+    pub fn task_progress(&self, id: &str, percent: f64, message: &str) -> rusqlite::Result<()> {
+        Connection::open(&self.db_path)?.execute(
+            "UPDATE jobs SET progress=?1,completed_steps=CAST(total_steps*?1/100 AS INTEGER),current_step=?2,updated_at=?3 WHERE id=?4 AND status IN ('running','cancel_requested')",
+            params![percent.clamp(0.0, 100.0),message,Utc::now().to_rfc3339(),id])?;
+        Ok(())
+    }
+
+    pub fn finish_task(&self, id: &str, result: Result<&str, &str>) -> rusqlite::Result<()> {
+        let (status, message, error) = match result {
+            Ok(message) => ("succeeded", message, None),
+            Err(error) => ("failed", "Operação não concluída", Some(error)),
+        };
+        Connection::open(&self.db_path)?.execute(
+            "UPDATE jobs SET status=?1,current_step=?2,error_message=?3,progress=CASE WHEN ?1='succeeded' THEN 100 ELSE progress END,completed_steps=CASE WHEN ?1='succeeded' THEN total_steps ELSE completed_steps END,updated_at=?4,finished_at=?4 WHERE id=?5",
+            params![status,message,error,Utc::now().to_rfc3339(),id])?;
+        self.cancellations.lock().unwrap().remove(id);
+        Ok(())
     }
 
     pub fn request_cancel(&self, id: &str) -> rusqlite::Result<bool> {

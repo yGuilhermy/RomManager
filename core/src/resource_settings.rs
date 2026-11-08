@@ -158,6 +158,9 @@ pub fn state(conn: &Connection, query: &GameQuery) -> Result<GameState, String> 
 }
 pub fn toggle(conn: &Connection, db: &Path, req: &ToggleRequest) -> Result<GameState, String> {
     let _lock = mc::EDIT_LOCK.lock().map_err(|e| e.to_string())?;
+    toggle_locked(conn, db, req)
+}
+pub(crate) fn toggle_locked(conn: &Connection, db: &Path, req: &ToggleRequest) -> Result<GameState, String> {
     mc::writable()?;
     if pcsx2::installation_id(conn)? != req.installation_id {
         return Err("A instalação mudou. Atualize a página.".into());
@@ -175,8 +178,7 @@ pub fn toggle(conn: &Connection, db: &Path, req: &ToggleRequest) -> Result<GameS
         .unwrap_or_default();
     if req.enabled
         && req.kind != "textures"
-        && mc::ini_value(&global, "Achievements", "HardcoreMode")
-            .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        && crate::achievements::read_pcsx2_achievements_config(conn).hardcore_mode
     {
         return Err("Desative o Hardcore antes de habilitar cheats ou patches.".into());
     }

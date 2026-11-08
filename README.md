@@ -52,11 +52,17 @@ O PCSX2 precisa estar instalado e configurado separadamente. O RomManager não i
 
 ### Roadmap do emulador
 
-- **A5 — Conquistas e aceitação:** integração de consulta com RetroAchievements e validação final do núcleo do emulador. Pendente.
-- **A6 — Catálogo e recursos online:** planejada. Atualizar os dados do catálogo pelo aplicativo e consultar Saves, Cheats, Patches e Texturas na página de cada jogo. Uma ação baixará e aplicará o recurso compatível, com origem, validação, backup e reversão. Saves perguntarão o memory card de destino, avisando sobre falta de espaço ou save existente. Cheats/patches respeitarão região, revisão, CRC e Hardcore; packs de texturas terão estrutura e versão verificadas.
-- **Console / OPL:** depois dos aceites A5/T39 e A6/T43 e das demais dependências técnicas.
+- **A5:** consulta RetroAchievements e aceitação do núcleo do emulador concluídas.
+- **A6 — Catálogo e Extras:** implementada. Atualize os metadados do Catálogo PS2 e pesquise Saves, Cheats, Patches e Texturas em **PlayStation 2 → Extras**, independentemente dos jogos instalados. Baixe pelo seletor nativo ou aplique em um destino compatível. Saves pedem o cartão e verificam espaço e substituições; cheats e patches exigem serial e CRC confirmado, respeitando Hardcore. Aplicações usam validação, backup e reversão.
+- **Console / OPL:** próxima etapa, sujeita às provas técnicas do roadmap.
 
-A busca e instalação online de recursos da A6 ainda não estão disponíveis. Hoje a administração usa arquivos locais. O plano e as tarefas ficam em `tasks/plan.md` e `tasks/todo.md` no workspace de desenvolvimento.
+Extras usa populares primeiro, seguindo a lista editorial do catálogo, com capas, fallback e grade ampla. A fonte principal de saves é **GameFAQs · arquivo de 21/04/2023**, com 1.853 jogos e 8.909 saves de PS2, preservados no Internet Archive. Não inclui uploads posteriores àquela data. Apollo Saves continua disponível no seletor. Cada save é baixado individualmente, sem obter o pacote completo de 1,8 GB; MAX e ZIP com um único PSV PS2 podem ser aplicados com myMCpp, confirmação de região/revisão e backup. CodeBreaker, SharkPort, X-Port e Xploder estão disponíveis para download, sem conversão automática.
+
+Outras fontes: PCSX2 Patches, pcsx2_cheats_collection e rac. Texturas limitadas inicialmente a duas edições verificadas de Ratchet & Clank. PNACH incompatível permite download, sem instalação automática. CRC confirmado pelo usuário no PCSX2, sem leitura automática da ROM.
+
+O índice GameFAQs vem no aplicativo, permitindo abrir a lista de jogos sem conexão com a fonte. Listas consultadas são mantidas em cache; descrições ficam salvas no disco e as telas são restauradas durante a sessão. Os arquivos dos saves são baixados ao clicar em baixar ou aplicar. Atualização manual preserva os dados anteriores quando a fonte falha.
+
+Plano e evidências: `tasks/plan.md`, `tasks/todo.md` e `docs/A6_VALIDATION.md` no workspace de desenvolvimento.
 
 ### Cuidados com os arquivos
 
@@ -127,6 +133,13 @@ A API atende em `127.0.0.1:3000`, com origens restritas ao desktop. A porta 3000
 | [libretro-thumbnails](https://github.com/libretro-thumbnails/Sony_-_PlayStation_2) | Fonte de capas pesquisadas pelo nome do jogo. |
 | [Wikipédia](https://www.wikipedia.org/) | Fonte de descrições dos jogos. |
 | [CDRomance](https://cdromance.org/) | Fonte da pesquisa adicional de traduções e versões modificadas. |
+| [GameFAQs e autores dos saves](https://gamefaqs.gamespot.com/ps2/saves) · [arquivo de 2023](https://archive.org/details/gamefaqs_savegames) | Saves de PS2 preservados no Internet Archive. |
+| [Apollo Saves · bucanero](https://github.com/bucanero/apollo-saves) | Fonte alternativa de saves. |
+| [myMCpp](https://github.com/PCSX2/myMCpp) | Administração e importação de saves em memory cards. |
+| [PCSX2 Patches](https://github.com/PCSX2/pcsx2_patches) | Patches para PCSX2. |
+| [PCSX2 Cheats Collection · xs1l3n7x](https://github.com/xs1l3n7x/pcsx2_cheats_collection) | Cheats da comunidade. |
+| [rac · Made-in-Slovakia](https://github.com/Made-in-Slovakia/rac) | Texturas para Ratchet & Clank. |
+| [RetroAchievements](https://retroachievements.org/) | Consulta de conquistas. |
 
 Use ROMs, BIOS e outros arquivos que você tenha direito de utilizar. Os projetos e serviços citados mantêm suas próprias licenças e condições de uso.
 

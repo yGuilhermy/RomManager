@@ -3,6 +3,7 @@ import { apiJson, cachedPcsx2Json, invalidatePcsx2Cache, peekPcsx2Json } from ".
 import { resourceQueue } from "../lib/resourceQueue";
 import { subscribe } from "../lib/smartCache";
 import { RESOURCES_PATH, gameStatePath } from "../lib/prefetcher";
+import { EXTRAS_APPLIED_EVENT } from "../lib/extras";
 import type { NativeState, ResourceContext, ResourceKind, ResourcePlan } from "../lib/gameResourceTypes";
 
 const snapshots = new Map<string, NativeState>();
@@ -49,12 +50,14 @@ export function useGameResources(gameId:string, serial:string|null, kind:Resourc
       if(detail?.gameId===gameId&&detail?.owner!==owner.current&&nativeRequired)void refresh(true);
     };
     window.addEventListener("rommanager:resources-changed",changed);
+    const applied=()=>{if(nativeRequired)void refresh(true);};
+    window.addEventListener(EXTRAS_APPLIED_EVENT,applied);
     const stop=subscribe(key=>{
       if(!mounted.current)return;
       if(key===RESOURCES_PATH){const next=peekPcsx2Json<ResourceContext>(key);if(next){contextRef.current=next;setContext(next);}}
       else if(key===gameStatePath(gameId,crcRef.current)){const next=peekPcsx2Json<NativeState>(key);if(next)remember(next);}
     });
-    return()=>{mounted.current=false;stop();window.removeEventListener("rommanager:resources-changed",changed);};
+    return()=>{mounted.current=false;stop();window.removeEventListener("rommanager:resources-changed",changed);window.removeEventListener(EXTRAS_APPLIED_EVENT,applied);};
   },[gameId]);
   const run=async<T,>(key:string,operation:()=>Promise<T>):Promise<T|undefined>=>{
     if(pending[key])return;

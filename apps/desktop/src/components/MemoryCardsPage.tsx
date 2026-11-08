@@ -5,6 +5,7 @@ import { CARDS_SUMMARY_PATH, cardPath, defaultCardName } from "../lib/prefetcher
 import { MemoryCardToolCard } from "./MemoryCardToolCard";
 import { BrowsePathButton } from "./BrowsePathButton";
 import { saveGeneratedFile } from "../lib/nativeFiles";
+import { EXTRAS_APPLIED_EVENT } from "../lib/extras";
 type Save = { title: string; serial: string | null; name: string; size: number; files: number };
 type Card = {
   name: string;
@@ -174,6 +175,11 @@ export function MemoryCardsPage({ gameSerial, embedded = false }: { gameSerial?:
     }
   };
   const disabled = busy || reading || !data || data.running;
+  useEffect(()=>{
+    const applied=()=>void load(true);
+    window.addEventListener(EXTRAS_APPLIED_EVENT,applied);
+    return()=>window.removeEventListener(EXTRAS_APPLIED_EVENT,applied);
+  },[]);
   return (
     <div className="emulator-page emulator-compact memory-page">
       {!embedded && <header className="panel-header emulator-heading">

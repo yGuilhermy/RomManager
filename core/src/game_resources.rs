@@ -141,7 +141,7 @@ pub fn validate_pnach(text: &str) -> R<()> {
     }
     let mut patches = 0;
     for raw in text.lines() {
-        let line = raw.trim().trim_start_matches('\u{feff}');
+        let line = raw.split("//").next().unwrap_or("").trim().trim_start_matches('\u{feff}');
         if line.is_empty()
             || line.starts_with("//")
             || line.starts_with('#')
@@ -155,9 +155,9 @@ pub fn validate_pnach(text: &str) -> R<()> {
             "patch" => {
                 let values: Vec<&str> = value.split(',').map(str::trim).collect();
                 if values.len() != 5
-                    || !["0", "1"].contains(&values[0])
+                    || !["0", "1", "2"].contains(&values[0])
                     || !["EE", "IOP"].contains(&values[1])
-                    || values[2].len() != 8
+                    || values[2].is_empty() || values[2].len() > 8
                     || !values[2].bytes().all(|c| c.is_ascii_hexdigit())
                     || !["byte", "short", "word", "double", "extended"].contains(&values[3])
                     || values[4].is_empty()
@@ -169,6 +169,13 @@ pub fn validate_pnach(text: &str) -> R<()> {
                 patches += 1;
             }
             "gametitle" | "comment" | "author" | "description" => {}
+            "gsaspectratio" => {
+                let valid=value.trim().split_once(':').is_some_and(|(a,b)|a.trim().parse::<u32>().is_ok_and(|n|n>0&&n<=10000)&&b.trim().parse::<u32>().is_ok_and(|n|n>0&&n<=10000));
+                if !valid{return Err("Proporção inválida no PNACH".into());}
+            }
+            "gsinterlacemode" => {
+                if !value.trim().parse::<u8>().is_ok_and(|v|v<=8){return Err("Modo de entrelaçamento inválido no PNACH".into());}
+            }
             _ => {
                 return Err(
                     "Diretiva PNACH não suportada nesta versão; arquivo preservado.".into(),
@@ -233,6 +240,9 @@ fn add_file(plan: &mut ResourcePlan, stage: &Path, relative: &str, data: &[u8]) 
 }
 pub fn action(conn: &Connection, db: &Path, req: ResourceRequest) -> R<ResourcePlan> {
     let _guard = mc::EDIT_LOCK.lock().map_err(e)?;
+    action_locked(conn, db, req)
+}
+pub(crate) fn action_locked(conn: &Connection, db: &Path, req: ResourceRequest) -> R<ResourcePlan> {
     mc::writable()?;
     let installation = pcsx2::current_installation(conn)?;
     let version = pcsx2::extract_pcsx2_version(Path::new(&installation.path));

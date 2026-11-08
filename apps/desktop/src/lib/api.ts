@@ -12,7 +12,7 @@ export async function apiFetch(path: string, options?: RequestInit): Promise<Res
     const attempts = method === "GET" ? 3 : 1;
     for (let attempt = 0; attempt < attempts; attempt++) {
         try {
-            const timeout = AbortSignal.timeout(path === "/api/pcsx2/install" ? 300000 : path.startsWith("/api/pcsx2/memory-cards") || path === "/api/pcsx2/resources" && method !== "GET" ? 180000 : path.includes("translations") ? 90000 : 30000);
+            const timeout = AbortSignal.timeout(path === "/api/pcsx2/install" ? 300000 : path.startsWith("/api/extras/games?") || path.startsWith("/api/extras/items?") || path.startsWith("/api/pcsx2/memory-cards") || path === "/api/pcsx2/resources" && method !== "GET" ? 180000 : path.includes("translations") ? 90000 : 30000);
             const signal = options?.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
             const response = await fetch(url, { ...options, signal });
             if (!response.ok) {
@@ -25,6 +25,7 @@ export async function apiFetch(path: string, options?: RequestInit): Promise<Res
             return response;
         } catch (error) {
             if (options?.signal?.aborted) throw error;
+            if (error instanceof Error && error.name === "TimeoutError" && path.startsWith("/api/extras/")) throw new Error("A fonte demorou para responder. Tente novamente; os dados salvos foram mantidos.");
             const retryable = error instanceof TypeError || error instanceof ApiError && [502, 503, 504].includes(error.status);
             if (!retryable || attempt === attempts - 1) throw error;
             await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));

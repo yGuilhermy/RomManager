@@ -45,8 +45,9 @@ fn get_catalog() -> &'static Vec<RomCatalogItem> {
         serde_json::from_str(raw).unwrap_or_default()
     })
 }
+pub fn embedded_catalog() -> &'static Vec<RomCatalogItem> { get_catalog() }
 
-fn get_popular_map() -> &'static HashMap<String, usize> {
+pub(crate) fn get_popular_map() -> &'static HashMap<String, usize> {
     POPULAR_IDS.get_or_init(|| {
         let raw = include_str!("popular_ids.json");
         let list: Vec<String> = serde_json::from_str(raw).unwrap_or_default();
@@ -81,6 +82,10 @@ pub fn query_catalog_with_format(
     per_page: usize,
 ) -> CatalogResponse {
     let catalog = get_catalog();
+    query_catalog_items(catalog,query,region,category,sort,letter,format_filter,page,per_page)
+}
+
+pub fn query_catalog_items(catalog:&[RomCatalogItem],query:Option<&str>,region:Option<&str>,category:Option<&str>,sort:Option<&str>,letter:Option<&str>,format_filter:Option<&str>,page:usize,per_page:usize)->CatalogResponse {
     let popular_map = get_popular_map();
 
     let q = query.map(|s| s.trim().to_lowercase()).unwrap_or_default();

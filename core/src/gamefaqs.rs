@@ -185,15 +185,14 @@ fn region(path: &str) -> &'static str {
     }
 }
 pub async fn games(http: &OnlineHttp, q: &str, page: usize) -> Result<GameResults, String> {
+    browse(http,q,&crate::extras_sources::BrowseOptions{page,..Default::default()}).await
+}
+pub async fn browse(http:&OnlineHttp,q:&str,options:&crate::extras_sources::BrowseOptions)->Result<GameResults,String>{
     let entries = index(http).await?;
-    let q = q.trim().to_lowercase();
     let mut games = BTreeMap::new();
     for entry in entries.iter().filter(|e| supported(&e.path)) {
         let raw = entry.path.split('/').next().unwrap();
         let title = title(&entry.path);
-        if q.split_whitespace()
-            .all(|s| title.to_lowercase().contains(s))
-        {
             games.entry(key(raw)).or_insert(ExtraGame {
                 cover_url: cover(&title),
                 key: key(raw),
@@ -201,20 +200,8 @@ pub async fn games(http: &OnlineHttp, q: &str, page: usize) -> Result<GameResult
                 serial: None,
                 crcs: vec![],
             });
-        }
     }
-    let mut games = games.into_values().collect::<Vec<_>>();
-    crate::extras_sources::sort_games(&mut games);
-    let total = games.len();
-    let page = page.max(1).min(total.div_ceil(24).max(1));
-    Ok(GameResults {
-        games: games.into_iter().skip((page - 1) * 24).take(24).collect(),
-        total,
-        page,
-        stale: http.stale.load(std::sync::atomic::Ordering::Relaxed),
-        source: SOURCE.into(),
-        version: VERSION.into(),
-    })
+    crate::extras_sources::browse_games(games.into_values().collect(),q,options,SOURCE.into(),VERSION.into(),http.stale.load(std::sync::atomic::Ordering::Relaxed))
 }
 fn check_header(header: &[u8], entry: &Entry) -> Result<(), String> {
     if header.len() != 30

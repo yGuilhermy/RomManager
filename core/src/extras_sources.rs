@@ -60,6 +60,27 @@ mod popularity_tests {
             crcs: vec![],
         }
     }
+    #[test]
+    fn browse_filters_and_sorts_before_paging_with_requested_size() {
+        let games=(0..40).rev().map(|i|game(&format!("Alpha {i:02}"),&format!("SLUS-{i:05}"))).collect();
+        let options=BrowseOptions{page:2,per_page:12,sort:"title_asc".into(),letter:"A".into()};
+        let found=browse_games(games,"Alpha",&options,"source".into(),"v".into(),false).unwrap();
+        assert_eq!((found.total,found.page,found.per_page,found.total_pages),(40,2,12,4));
+        assert_eq!(found.games[0].title,"Alpha 12");assert_eq!(found.games[11].title,"Alpha 23");
+        let reverse=browse_games(found.games,"",&BrowseOptions{sort:"title_desc".into(),..Default::default()},"s".into(),"v".into(),false).unwrap();
+        assert_eq!(reverse.games[0].title,"Alpha 23");
+    }
+    #[test]
+    fn browse_handles_symbols_unknown_letters_invalid_options_and_serial_search() {
+        let options=BrowseOptions{letter:"#".into(),page:999,..Default::default()};
+        let found=browse_games(vec![game("007", "SLUS-12345"),game("Alpha", "SLUS-54321")],"12345",&options,"s".into(),"v".into(),false).unwrap();
+        assert_eq!(found.total,1);assert_eq!(found.page,1);assert_eq!(found.games[0].title,"007");
+        let empty=browse_games(found.games,"",&BrowseOptions{letter:"Z".into(),..Default::default()},"s".into(),"v".into(),false).unwrap();
+        assert_eq!((empty.total,empty.page,empty.total_pages),(0,1,1));
+        for size in [0,1,1000] {assert!(BrowseOptions{per_page:size,..Default::default()}.validate().is_err());}
+        assert!(BrowseOptions{letter:"AA".into(),..Default::default()}.validate().is_err());
+        assert!(BrowseOptions{sort:"unexpected".into(),..Default::default()}.validate().is_err());
+    }
 
     #[test]
     fn popular_games_precede_alphabetical_results_without_removing_editions() {
@@ -136,9 +157,45 @@ pub struct GameResults {
     pub games: Vec<ExtraGame>,
     pub total: usize,
     pub page: usize,
+    pub per_page: usize,
+    pub total_pages: usize,
     pub stale: bool,
     pub source: String,
     pub version: String,
+}
+pub struct BrowseOptions {
+    pub page: usize,
+    pub per_page: usize,
+    pub sort: String,
+    pub letter: String,
+}
+impl Default for BrowseOptions {
+    fn default()->Self{Self{page:1,per_page:24,sort:"popular".into(),letter:String::new()}}
+}
+impl BrowseOptions {
+    pub fn validate(&self)->Result<(),String>{
+        if ![12,24,48,96].contains(&self.per_page) || !["popular","title_asc","title_desc"].contains(&self.sort.as_str()) || !(self.letter.is_empty() || self.letter=="#" || self.letter.len()==1 && self.letter.bytes().all(|b|b.is_ascii_uppercase())) {
+            return Err("Filtros de extras inválidos".into());
+        }
+        Ok(())
+    }
+}
+pub(crate) fn browse_games(mut games:Vec<ExtraGame>, q:&str, options:&BrowseOptions, source:String, version:String, stale:bool)->Result<GameResults,String>{
+    options.validate()?;
+    if q.len()>256{return Err("Busca muito longa".into());}
+    let q=q.trim().to_lowercase();
+    games.retain(|g|{
+        let text=format!("{} {}",g.title,g.key).to_lowercase();
+        let first=g.title.chars().next().unwrap_or(' ');
+        q.split_whitespace().all(|word|text.contains(word)) && (options.letter.is_empty() || if options.letter=="#" {!first.is_alphabetic()} else {first.to_uppercase().to_string()==options.letter})
+    });
+    match options.sort.as_str(){
+        "title_asc"=>games.sort_by_cached_key(|g|(g.title.to_lowercase(),g.key.clone())),
+        "title_desc"=>games.sort_by_cached_key(|g|(std::cmp::Reverse(g.title.to_lowercase()),g.key.clone())),
+        _=>sort_games(&mut games),
+    }
+    let total=games.len();let total_pages=total.div_ceil(options.per_page).max(1);let page=options.page.max(1).min(total_pages);
+    Ok(GameResults{games:games.into_iter().skip((page-1)*options.per_page).take(options.per_page).collect(),total,page,per_page:options.per_page,total_pages,source,version,stale})
 }
 #[derive(Serialize)]
 pub struct ItemResults {
@@ -426,30 +483,11 @@ pub async fn games(
     q: &str,
     page: usize,
 ) -> Result<GameResults, String> {
+    browse(http,kind,q,&BrowseOptions{page,..Default::default()}).await
+}
+pub async fn browse(http:&OnlineHttp,kind:&str,q:&str,options:&BrowseOptions)->Result<GameResults,String>{
     let idx = index(http, kind).await?;
-    let q = q.trim().to_lowercase();
-    if q.len() > 256 {
-        return Err("Busca muito longa".into());
-    }
-    let mut all = idx
-        .games
-        .into_values()
-        .filter(|g| {
-            q.split_whitespace()
-                .all(|s| format!("{} {}", g.title, g.key).to_lowercase().contains(s))
-        })
-        .collect::<Vec<_>>();
-    sort_games(&mut all);
-    let total = all.len();
-    let page = page.max(1).min(total.div_ceil(24).max(1));
-    Ok(GameResults {
-        games: all.into_iter().skip((page - 1) * 24).take(24).collect(),
-        total,
-        page,
-        stale: http.stale.load(std::sync::atomic::Ordering::Relaxed),
-        source: repo(kind)?.into(),
-        version: idx.version,
-    })
+    browse_games(idx.games.into_values().collect(),q,options,repo(kind)?.into(),idx.version,http.stale.load(std::sync::atomic::Ordering::Relaxed))
 }
 pub async fn items(http: &OnlineHttp, kind: &str, key: &str) -> Result<ItemResults, String> {
     if kind == "saves" && key.starts_with("GFQ:") { return crate::gamefaqs::items(http,key).await; }

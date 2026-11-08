@@ -23,6 +23,9 @@ pub struct SearchQuery {
     pub q: String,
     #[serde(default)]
     pub page: usize,
+    pub per_page: Option<usize>,
+    pub sort: Option<String>,
+    pub letter: Option<String>,
     #[serde(default)]
     pub refresh: bool,
 }
@@ -44,8 +47,10 @@ pub async fn games(
         ));
     }
     let http = OnlineHttp::new(&s.db_path, q.refresh, None).map_err(bad)?;
+    let options=extras_sources::BrowseOptions{page:q.page,per_page:q.per_page.unwrap_or(24),sort:q.sort.unwrap_or_else(||"popular".into()),letter:q.letter.unwrap_or_default().trim().to_uppercase()};
+    options.validate().map_err(|e|(StatusCode::BAD_REQUEST,e))?;
     if q.kind == "saves" && q.source.as_deref().unwrap_or("gamefaqs") == "gamefaqs" {
-        return crate::gamefaqs::games(&http, &q.q, q.page)
+        return crate::gamefaqs::browse(&http, &q.q, &options)
             .await
             .map(Json)
             .map_err(bad);
@@ -56,7 +61,7 @@ pub async fn games(
     {
         return Err((StatusCode::BAD_REQUEST, "Fonte desconhecida".into()));
     }
-    extras_sources::games(&http, &q.kind, &q.q, q.page)
+    extras_sources::browse(&http, &q.kind, &q.q, &options)
         .await
         .map(Json)
         .map_err(bad)

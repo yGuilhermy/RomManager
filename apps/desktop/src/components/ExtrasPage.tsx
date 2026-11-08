@@ -16,6 +16,7 @@ import {
 import type { InstalledGame } from "../types";
 import { useExtraOperation } from "./useExtraOperation";
 import { CoverImage } from "./CoverImage";
+import { SaveExtrasList } from "./SaveExtrasList";
 
 type Card = {
   name: string;
@@ -40,6 +41,8 @@ type Destination = {
 };
 export function ExtrasPage({ installed }: { installed: InstalledGame[] }) {
   const [saveSource, setSaveSource] = useState("gamefaqs");
+  const [browseSort,setBrowseSort]=useState("popular"), [letter,setLetter]=useState(""), [perPage,setPerPage]=useState(24);
+  const [jumpPage,setJumpPage]=useState("");
   const [kind, setKind] = useState<ExtraKind>("saves"),
     [q, setQ] = useState(""),
     [page, setPage] = useState(1);
@@ -67,7 +70,7 @@ export function ExtrasPage({ installed }: { installed: InstalledGame[] }) {
   useEffect(() => {
     if (selected) return;
     let active = true;
-    const path = `/api/extras/games?kind=${kind}&q=${encodeURIComponent(q)}&page=${page}${kind === "saves" ? `&source=${saveSource}` : ""}`;
+    const path = `/api/extras/games?kind=${kind}&q=${encodeURIComponent(q)}&page=${page}${kind === "saves" ? `&source=${saveSource}` : ""}&sort=${browseSort}&letter=${encodeURIComponent(letter)}&per_page=${perPage}`;
     const cached=peekExtras<GameResults>(path);
     setGames(cached || null);
     setError("");
@@ -91,7 +94,7 @@ export function ExtrasPage({ installed }: { installed: InstalledGame[] }) {
       active = false;
       clearTimeout(timer);
     };
-  }, [kind, q, page, refresh, saveSource, selected?.key]);
+  }, [kind, q, page, refresh, saveSource, selected?.key,browseSort,letter,perPage]);
   useEffect(() => {
     if (!selected) {
       setItems(null);
@@ -221,15 +224,23 @@ export function ExtrasPage({ installed }: { installed: InstalledGame[] }) {
     if(selected)gamesRefresh.current=refresh+1;else itemsRefresh.current=refresh+1;
     setRefresh((v)=>v+1);
   };
+  const renderItemActions=(item:ExtraItem)=><div className="extras-actions">
+    <button type="button" className="button-primary" disabled={operation.busy} onClick={()=>void operation.start({action:"download",kind:item.kind,game_key:item.game_key,item_id:item.id})}>Baixar arquivo</button>
+    <button type="button" className="button-secondary" disabled={operation.busy || !canApplyExtra(item, installed)} onClick={()=>openDestination(item)}>Baixar e aplicar…</button>
+  </div>;
+  const totalPages=games?.total_pages ?? Math.max(1,Math.ceil((games?.total || 0)/perPage));
+  const currentPage=games?.page ?? page;
   return (
     <div className="extras-page">
-      <header className="page-heading extras-heading">
+      <header className="catalog-heading panel extras-heading">
         <div>
-          <h2>Extras</h2>
-          <p>Saves, códigos e melhorias para PlayStation 2</p>
+          <p className="field-hint">PLAYSTATION 2</p>
+          <h1>Extras</h1>
         </div>
+        <div className="extras-heading-summary">
+        {!selected && <span className="field-hint">{(games?.total || 0).toLocaleString("pt-BR")} resultados</span>}
         <div className="extras-header-actions">
-        {kind === "saves" && <select id="extras-save-source" aria-label="Fonte de saves" title="GameFAQs: arquivo de 21/04/2023" value={saveSource} onChange={(e) => {
+        {kind === "saves" && <select className="compact-input" id="extras-save-source" aria-label="Fonte de saves" title="GameFAQs: arquivo de 21/04/2023" value={saveSource} onChange={(e) => {
           setSaveSource(e.target.value); setSelected(null); setPage(1); setDestination(null); setRefresh(0);
         }}>
           <option value="gamefaqs">GameFAQs (2023)</option>
@@ -244,9 +255,11 @@ export function ExtrasPage({ installed }: { installed: InstalledGame[] }) {
           Atualizar fontes
         </button>
         </div>
+        </div>
       </header>
+      <div className="catalog-toolbar extras-catalog-toolbar">
       <div
-        className="theme-tabs extras-tabs"
+        className="sort-tabs"
         role="group"
         aria-label="Categorias de extras"
       >
@@ -254,13 +267,17 @@ export function ExtrasPage({ installed }: { installed: InstalledGame[] }) {
           <button
             type="button"
             key={value}
-            className={`theme-selection ${kind === value ? "active" : ""}`}
+            className={`sort-tab-btn${kind === value ? " active" : ""}`}
             aria-pressed={kind === value}
             onClick={() => changeKind(value)}
           >
             {extraLabels[value]}
           </button>
         ))}
+      </div>
+      {!selected && <label className="inline-field" htmlFor="extras-sort">Ordem<select id="extras-sort" aria-label="Ordem" value={browseSort} onChange={event=>{setBrowseSort(event.target.value);setPage(1);setRefresh(0);}}>
+        <option value="popular">Populares</option><option value="title_asc">A–Z</option><option value="title_desc">Z–A</option>
+      </select></label>}
       </div>
       {operation.error && (
         <p className="a4-notice error" role="alert">
@@ -332,12 +349,15 @@ export function ExtrasPage({ installed }: { installed: InstalledGame[] }) {
       )}
       {!selected ? (
         <>
-          <div className="extras-search">
-            <label htmlFor="extras-search">Buscar qualquer jogo</label>
+          <div className="alphabet-bar">
+            <nav className="alphabet-nav" aria-label="Índice alfabético de extras">{["","#",..."ABCDEFGHIJKLMNOPQRSTUVWXYZ"].map(value=><button type="button" key={value || "all"} className={`alphabet-btn${letter===value?" active":""}`} aria-pressed={letter===value} onClick={()=>{setLetter(value);setPage(1);setRefresh(0);if(value)setBrowseSort("title_asc");}}>{value || "Todos"}</button>)}</nav>
+            <div className="catalog-tools">
+            <label className="visually-hidden" htmlFor="extras-search">Buscar qualquer jogo</label>
             <input
               id="extras-search"
+              className="compact-input"
               type="search"
-              placeholder="Nome ou serial"
+              placeholder="Buscar nos extras…"
               value={q}
               onChange={(e) => {
                 setQ(e.target.value);
@@ -345,55 +365,42 @@ export function ExtrasPage({ installed }: { installed: InstalledGame[] }) {
                 setRefresh(0);
               }}
             />
-            <span className="field-hint">
-              {loading
-                ? "Consultando fonte…"
-                : `${games?.total.toLocaleString("pt-BR") || 0} jogos`}
-            </span>
+            <label className="catalog-page-size" htmlFor="extras-page-size">Por página<select id="extras-page-size" aria-label="Por página" value={perPage} onChange={event=>{setPerPage(Number(event.target.value));setPage(1);setRefresh(0);}}>{[12,24,48,96].map(value=><option key={value}>{value}</option>)}</select></label>
+            </div>
           </div>
-          <div className="extras-game-grid" aria-busy={loading}>
+          {loading && !games && <div className="loader-state" role="status"><div className="spinner"/><p>Carregando extras…</p></div>}
+          <div className="mods-grid extras-game-grid" aria-busy={loading}>
             {games?.games.map((game) => (
-              <button
-                type="button"
-                className="extras-game theme-selection"
+              <article
+                className="mod-card extras-game"
                 key={game.key}
-                onClick={() => setSelected(game)}
               >
-                <div className="extras-game-cover" aria-hidden="true"><CoverImage src={extraCover(game)} title={game.title} /></div>
-                <div className="extras-game-copy"><strong>{game.title}</strong>
-                <span>
-                  {game.serial || (game.key.startsWith("GFQ:") ? "Saves por região e formato" : "Serial não informado")}
-                  {game.crcs.length ? ` · ${game.crcs.length} revisões` : ""}
-                </span></div>
-              </button>
+                <div className="mod-thumb-wrap"><button type="button" className="catalog-cover-button mod-thumb extras-game-cover" aria-label={`Detalhes de ${game.title}`} onClick={()=>setSelected(game)}><CoverImage src={extraCover(game)} title={game.title}/></button></div>
+                <div className="mod-meta">
+                  <h3 className="mod-title"><button type="button" className="card-open" onClick={()=>setSelected(game)}>{game.title}</button></h3>
+                  <div className="card-badges-row"><span className="card-badge-chip card-badge-format">{extraLabels[kind]}</span>{kind==="saves" && <span className="card-badge-chip">{saveSource==="gamefaqs"?"GameFAQs":"Apollo"}</span>}</div>
+                  {(game.serial || game.crcs.length>0) && <p className="mod-author">{[game.serial,game.crcs.length?`${game.crcs.length} revisões`:null].filter(Boolean).join(" · ")}</p>}
+                  <div className="card-action-bar"><button type="button" className="button-secondary" onClick={()=>setSelected(game)}>Ver {extraLabels[kind].toLowerCase()}</button></div>
+                </div>
+              </article>
             ))}
           </div>
           {!loading && games && !games.games.length && (
-            <p className="resource-empty">
-              Nenhum jogo encontrado nesta fonte.
-            </p>
+            <div className="empty-state">
+              <h3>Nenhum título encontrado</h3><p>Nenhum jogo corresponde aos filtros ou à pesquisa.</p>
+              {(q || letter) && <button type="button" className="button-secondary" onClick={()=>{setQ("");setLetter("");setPage(1);setRefresh(0);}}>Limpar filtros</button>}
+            </div>
           )}
-          {!!games && games.total > 24 && (
-            <nav className="extras-pagination" aria-label="Páginas de extras">
-              <button
-                type="button"
-                className="button-secondary"
-                disabled={page <= 1 || loading}
-                onClick={() => setPage((p) => p - 1)}
-              >
-                Anterior
-              </button>
-              <span>
-                Página {games.page} de {Math.ceil(games.total / 24)}
-              </span>
-              <button
-                type="button"
-                className="button-secondary"
-                disabled={page >= Math.ceil(games.total / 24) || loading}
-                onClick={() => setPage((p) => p + 1)}
-              >
-                Próxima
-              </button>
+          {!!games && games.total > 0 && (
+            <nav className="pagination" aria-label="Páginas de extras">
+              <button type="button" className="page-btn" disabled={currentPage<=1 || loading} onClick={()=>setPage(1)}>Primeira</button>
+              <button type="button" className="page-btn" disabled={currentPage<=1 || loading} onClick={()=>setPage(current=>Math.max(1,current-1))}>Anterior</button>
+              <span className="pagination-current">{currentPage} de {totalPages}</span>
+              <button type="button" className="page-btn" disabled={currentPage>=totalPages || loading} onClick={()=>setPage(current=>Math.min(totalPages,current+1))}>Próxima</button>
+              <button type="button" className="page-btn" disabled={currentPage>=totalPages || loading} onClick={()=>setPage(totalPages)}>Última</button>
+              <form className="page-jump" onSubmit={event=>{event.preventDefault();const target=Number(jumpPage);if(Number.isInteger(target)&&target>=1&&target<=totalPages){setPage(target);setJumpPage("");}}}>
+                <label htmlFor="extras-jump-page">Ir para</label><input id="extras-jump-page" type="number" min="1" max={totalPages} value={jumpPage} onChange={event=>setJumpPage(event.target.value)}/><button type="submit" className="page-btn" disabled={loading}>Ir</button>
+              </form>
             </nav>
           )}
         </>
@@ -421,7 +428,7 @@ export function ExtrasPage({ installed }: { installed: InstalledGame[] }) {
           {reading && (
             <p role="status">Consultando {extraLabels[kind].toLowerCase()}…</p>
           )}
-          <div className="extras-items-grid">{items?.items.map((item) => (
+          {kind === "saves" ? <SaveExtrasList items={items?.items || []} actions={renderItemActions} /> : <div className="extras-items-grid">{items?.items.map((item) => (
             <article className="panel extras-item" key={item.id}>
               <div className="extras-item-heading">
                 <div>
@@ -452,47 +459,20 @@ export function ExtrasPage({ installed }: { installed: InstalledGame[] }) {
                 </a>
                 <span>{item.license}</span>
               </div>
-              <div className="extras-actions">
-                <button
-                  type="button"
-                  className="button-primary"
-                  disabled={operation.busy}
-                  onClick={() =>
-                    void operation.start({
-                      action: "download",
-                      kind: item.kind,
-                      game_key: item.game_key,
-                      item_id: item.id,
-                    })
-                  }
-                >
-                  Baixar arquivo
-                </button>
-                <button
-                  type="button"
-                  className="button-secondary"
-                  disabled={
-                    operation.busy ||
-                    !canApplyExtra(item, installed)
-                  }
-                  onClick={() => openDestination(item)}
-                >
-                  Baixar e aplicar…
-                </button>
-              </div>
+              {renderItemActions(item)}
               {item.install_note && (
                 <p className="field-hint">
                   {!item.installable && "Somente download: "}{item.install_note}
                 </p>
               )}
-              {kind !== "saves" && !localTargets(item, installed).length && (
+              {!localTargets(item, installed).length && (
                 <p className="field-hint">
                   Para aplicar, adicione esta edição à biblioteca. O download
                   avulso está disponível.
                 </p>
               )}
             </article>
-          ))}</div>
+          ))}</div>}
           {!reading && items && !items.items.length && (
             <p className="resource-empty">
               Nenhum arquivo reconhecido para esta edição na fonte.

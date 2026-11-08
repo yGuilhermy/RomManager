@@ -1,6 +1,29 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { localTargets,extraCover,completedOnlineJobs,canApplyExtra } from "../src/lib/extras.ts";
+import { localTargets,extraCover,completedOnlineJobs,canApplyExtra,groupSaveItems } from "../src/lib/extras.ts";
+
+test("GameFAQs saves are grouped by format and region without losing entries",()=>{
+  const save=(id,format,region)=>({id,title:`Save #${id} · ${format} · ${region}`,game_key:"GFQ:game",serial:null,source_url:"https://archive.org/details/gamefaqs_savegames"});
+  const items=[save("1","CodeBreaker","Europa"),save("2","Max Drive","América do Norte"),save("3","Max Drive","Europa"),save("4","PSV / ZIP","Japão")];
+  const groups=groupSaveItems(items);
+  assert.deepEqual(groups.map(g=>g.key),["max","zip","cbs"]);
+  assert.deepEqual(groups[0].regions.map(r=>r.name),["América do Norte","Europa"]);
+  assert.deepEqual(groups.flatMap(g=>g.regions.flatMap(r=>r.items)).map(i=>i.id).sort(),["1","2","3","4"]);
+});
+
+test("Apollo saves use the delivered PSU format and keep unknown regions explicit",()=>{
+  const items=[{id:"a",title:"Game · 0001",game_key:"SLUS-21488",serial:"SLUS-21488",source_url:"https://github.com/bucanero/apollo-saves"},
+    {id:"b",title:"Game · 0002",game_key:"UNKNOWN",serial:null,source_url:"https://github.com/bucanero/apollo-saves"}];
+  const groups=groupSaveItems(items);
+  assert.equal(groups.length,1);assert.equal(groups[0].key,"psu");
+  assert.deepEqual(groups[0].regions.map(r=>r.name),["América do Norte","Região não informada"]);
+});
+
+test("unknown save formats stay available in their own section",()=>{
+  const groups=groupSaveItems([{id:"x",title:"Unrecognized save",game_key:"GFQ:game",serial:null,source_url:"https://archive.org/details/gamefaqs_savegames"}]);
+  assert.equal(groups[0].key,"other");assert.equal(groups[0].regions[0].name,"Região não informada");assert.equal(groups[0].items[0].id,"x");
+  assert.deepEqual(groupSaveItems([]),[]);
+});
 
 test("GameFAQs saves may choose a card without a catalog serial or installed ROM, while unsupported formats and resources stay blocked",()=>{
   assert.equal(canApplyExtra({kind:"saves",serial:null,installable:true},[]),true);

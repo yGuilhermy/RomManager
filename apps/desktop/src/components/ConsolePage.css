@@ -1,0 +1,244 @@
+.console-page {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  width: 100%;
+  min-width: 0;
+}
+.console-page > .catalog-page-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+  padding: 20px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.console-page h2 {
+  margin: 6px 0 0;
+}
+.console-page .text-button {
+  padding: 8px;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.console-page button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.console-page .console-destination {
+  margin: 0;
+  padding: 20px;
+}
+.console-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 12px;
+  min-width: 0;
+}
+.console-toolbar > h3 {
+  margin-right: auto;
+}
+.console-grow {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+.console-page label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+.console-page input:not([type="checkbox"]),
+.console-page select {
+  min-height: 40px;
+  padding: 9px 12px;
+  border: 1px solid var(--border-hover);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  min-width: 0;
+}
+.console-page .console-toolbar > input {
+  flex: 1 1 240px;
+}
+.console-add-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  border-top: 1px solid var(--border);
+  margin-top: 20px;
+  padding-top: 20px;
+}
+.console-add-form > .console-grow {
+  flex: initial;
+}
+.console-device-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 20px;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+  margin: 20px 0 16px;
+}
+.console-target-path {
+  margin-top: 16px;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.console-target-path + .console-device-meta {
+  margin-top: 12px;
+}
+.console-destination > .field-hint {
+  margin-top: 12px;
+}
+.console-notice {
+  padding: 14px 18px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+  font-size: 0.85rem;
+}
+.console-notice .text-button {
+  margin-left: 16px;
+}
+.console-cache-info {
+  align-items: center;
+  justify-content: space-between;
+}
+.console-diagnostics {
+  overflow-wrap: anywhere;
+  line-height: 1.6;
+}
+.console-diagnostics summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.console-diagnostics ul {
+  padding-left: 22px;
+  margin-top: 12px;
+}
+.console-diagnostics li + li {
+  margin-top: 8px;
+}
+.console-filters {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+  padding: 12px 16px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.console-filters .theme-selection {
+  padding: 10px 14px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0 0 6px 6px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.8rem;
+}
+.console-filters .theme-selection[aria-pressed="true"] {
+  color: var(--selection-color);
+  background: var(--selection-surface);
+  border-bottom-color: var(--selection-color);
+}
+.console-page .card-badge-chip {
+  padding: 3px 7px;
+  font-size: 0.7rem;
+  border-radius: 4px;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+}
+.console-filters > input {
+  flex: 1 1 240px;
+}
+.console-filters > label {
+  flex-direction: row;
+  align-items: center;
+}
+.console-page label.console-checkbox {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+.console-page input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+.console-game-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.console-game-list .console-game-row {
+  flex-direction: row;
+  align-items: center;
+  min-height: 110px;
+}
+.console-game-row .library-game-cover {
+  width: 80px;
+  height: 110px;
+}
+.console-game-row .library-game-info h3 {
+  min-height: 0;
+}
+.console-game-row .library-game-actions {
+  margin: 0;
+  flex-shrink: 0;
+}
+.console-game-dialog {
+  width: min(760px, calc(100vw - 40px));
+  max-height: 80vh;
+  margin: auto;
+  padding: 24px;
+  background: var(--bg-2);
+  color: var(--text);
+  border: 1px solid var(--border-hover);
+  border-radius: var(--radius);
+}
+.console-game-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.7);
+}
+.console-game-dialog .field-hint {
+  margin: 16px 0;
+}
+@media (max-width: 800px) {
+  .console-page .console-destination {
+    padding: 16px;
+  }
+  .console-game-row .library-game-actions {
+    padding: 8px;
+  }
+  .console-game-row .library-game-info {
+    padding: 10px;
+  }
+  .console-game-row .library-game-cover {
+    width: 65px;
+    height: 96px;
+  }
+  .console-game-row .library-game-actions button {
+    max-width: 90px;
+    white-space: normal;
+  }
+}

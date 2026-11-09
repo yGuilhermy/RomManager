@@ -36,7 +36,6 @@ Para gerar uma versão local, siga as instruções de [compilação](#compilando
 
 O PCSX2 precisa estar instalado e configurado separadamente. O RomManager não inclui o emulador nem a BIOS.
 
-## Funcionalidades principais
 
 - **Biblioteca local:** indexação de ROMs nos formatos CHD, ISO, CSO, BIN e GZ, com busca, ordenação, filtros de região e formato e visualização em grade ou lista.
 - **Catálogo PS2:** catálogo local com 4.427 entradas, pesquisa por título, índice alfabético, paginação e ordenação por popularidade, nome ou tamanho, conforme a tela.

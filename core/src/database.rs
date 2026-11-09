@@ -19,6 +19,12 @@ pub fn initialize_db(db_path: &Path) -> Result<Connection> {
             value TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS console_targets (
+            id TEXT PRIMARY KEY,
+            target_json TEXT NOT NULL,
+            snapshot_json TEXT
+        );
+
         CREATE TABLE IF NOT EXISTS games (
             id TEXT PRIMARY KEY,
             title TEXT NOT NULL,

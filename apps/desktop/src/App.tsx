@@ -16,6 +16,7 @@ import { MemoryCardsPage } from "./components/MemoryCardsPage";
 import { BiosPage } from "./components/BiosPage";
 import { AchievementsPage } from "./components/AchievementsPage";
 import { ExtrasPage } from "./components/ExtrasPage";
+import { ConsolePage } from "./components/ConsolePage";
 import { CatalogUpdate } from "./components/CatalogUpdate";
 import { completedOnlineJobs,EXTRAS_APPLIED_EVENT,type ExtraOperation } from "./lib/extras";
 import packageInfo from "../package.json";
@@ -78,7 +79,7 @@ interface GameMetadata {
     compatibility: Pcsx2Compat | null;
 }
 
-type Tab = "memory-cards" | "library" | "bios" | "achievements" | "catalog" | "extras" | "search" | "downloads" | "activity" | "settings" | "profile" | "game-page";
+type Tab = "console-library" | "memory-cards" | "library" | "bios" | "achievements" | "catalog" | "extras" | "search" | "downloads" | "activity" | "settings" | "profile" | "game-page";
 
 const PER_PAGE_OPTIONS = [12, 24, 48, 96];
 
@@ -103,6 +104,7 @@ const STATUS_LABEL: Record<string, string> = {
 
 function renderNavIcon(id: Tab) {
     switch (id) {
+        case "console-library":
         case "library":
             return (
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -1263,6 +1265,12 @@ export default function App() {
                     ))}
                 </nav>
 
+                <div className="section-label">CONSOLE · PS2</div>
+                <nav className="nav nav-group" aria-label="Navegação Console PS2">
+                    <button className={`nav-item${activeTab === "console-library" ? " active" : ""}`} aria-current={activeTab === "console-library" ? "page" : undefined} onClick={() => setActiveTab("console-library")}>
+                        <span className="nav-icon">{renderNavIcon("console-library")}</span><span>Biblioteca do Console</span>
+                    </button>
+                </nav>
                 <div className="section-label">GERAL</div>
                 <nav className="nav nav-group" aria-label="Navegação Geral">
                     {([
@@ -1545,6 +1553,7 @@ export default function App() {
                     {activeTab === "bios" && <BiosPage onShowToast={showToast} />}
                     {activeTab === "memory-cards" && <MemoryCardsPage />}
                     {activeTab === "extras" && <ExtrasPage installed={installedGames} />}
+                    {activeTab === "console-library" && <ConsolePage />}
                     {activeTab === "achievements" && <AchievementsPage onShowToast={showToast} />}
 
                     {activeTab === "game-page" && selectedGame && (

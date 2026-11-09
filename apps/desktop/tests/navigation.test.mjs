@@ -34,7 +34,10 @@ test("navigation structure contains PlayStation 2, Emulador and Geral groups in 
         assert.ok(content.includes(item), `Missing General item: ${item}`);
     }
 
-    assert.ok(!content.includes("CONSOLE · PS2"), "Console group should not appear in stage A");
+    assert.ok(content.includes("CONSOLE · PS2"), "B0 exposes the Console library");
+    assert.ok(content.indexOf("EMULADOR · PCSX2") < content.indexOf("CONSOLE · PS2"));
+    assert.ok(content.indexOf("CONSOLE · PS2") < content.indexOf('section-label">GERAL'));
+    assert.ok(content.includes('{activeTab === "console-library" && <ConsolePage />}'));
     assert.ok(!content.includes("Dispositivos"), "Dispositivos should not appear in stage A");
     assert.ok(!content.includes("Transferência OPL"), "OPL transfer should not appear in stage A");
     assert.ok(!content.includes("Memória USB"), "USB transfer should not appear in stage A");

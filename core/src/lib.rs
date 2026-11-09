@@ -3,6 +3,7 @@ pub mod api_roms;
 pub mod cache;
 pub mod catalog_refresh;
 pub mod chd;
+pub mod console;
 pub mod covers;
 pub mod database;
 pub mod download_manager;
@@ -200,6 +201,7 @@ pub async fn start_api() {
         .allow_headers(Any);
 
     let app = Router::new()
+        .merge(console::api::router())
         .route("/health", get(health_check))
         .route("/api/health", get(health_check))
         .route("/config", get(get_configs).post(set_config))
